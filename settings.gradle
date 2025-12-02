@@ -1,0 +1,2 @@
+rootProject.name = "OpenWatt Droid"
+include ':app'
