@@ -12,12 +12,19 @@ import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
+import androidx.lifecycle.lifecycleScope
 import com.openwatt.droid.R
 import com.openwatt.droid.databinding.ActivityDashboardBinding
 import com.openwatt.droid.databinding.ToolbarTitleWithStatusBinding
+import com.openwatt.droid.model.Server
+import com.openwatt.droid.network.CliClient
 import com.openwatt.droid.repository.ServerRepository
 import com.openwatt.droid.ui.fragments.HomeFragment
 import com.openwatt.droid.viewmodel.DashboardViewModel
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 
 class DashboardActivity : AppCompatActivity() {
     private lateinit var binding: ActivityDashboardBinding
@@ -230,6 +237,10 @@ class DashboardActivity : AppCompatActivity() {
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         return when (item.itemId) {
+            R.id.action_system_info -> {
+                showSystemInfo()
+                true
+            }
             R.id.action_console -> {
                 openConsole()
                 true
@@ -240,6 +251,48 @@ class DashboardActivity : AppCompatActivity() {
             }
             else -> super.onOptionsItemSelected(item)
         }
+    }
+
+    private fun showSystemInfo() {
+        val serverRepository = ServerRepository(this)
+        val server = currentServerId?.let { serverRepository.getServer(it) } ?: return
+        val cliClient = CliClient()
+
+        // Inflate dialog view
+        val dialogView = layoutInflater.inflate(R.layout.dialog_system_info, null)
+        val textView = dialogView.findViewById<TextView>(R.id.tv_system_info)
+
+        // Create dialog
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("System Info")
+            .setView(dialogView)
+            .setNegativeButton("Close", null)
+            .create()
+
+        // Start polling coroutine
+        var pollingJob: Job? = null
+        pollingJob = lifecycleScope.launch {
+            while (isActive) {
+                try {
+                    val result = cliClient.executeCommand(server, "/system/sysinfo")
+                    result.onSuccess { response ->
+                        textView.text = response.output
+                    }.onFailure { exception ->
+                        textView.text = "Error: ${exception.message}"
+                    }
+                } catch (e: Exception) {
+                    textView.text = "Error: ${e.message}"
+                }
+                delay(1000) // Poll every 1 second
+            }
+        }
+
+        // Cancel polling when dialog is dismissed
+        dialog.setOnDismissListener {
+            pollingJob?.cancel()
+        }
+
+        dialog.show()
     }
 
     private fun openConsole() {

@@ -41,24 +41,8 @@ class HomeFragment : Fragment() {
     }
 
     private fun observeViewModel() {
-        viewModel.systemInfo.observe(viewLifecycleOwner) { systemInfo ->
-            binding.tvStatus.text = systemInfo.status
-            binding.tvUptime.text = systemInfo.uptime
-
-            // Update status indicator color
-            val indicatorColor = if (systemInfo.isHealthy) {
-                ContextCompat.getColor(requireContext(), android.R.color.holo_green_dark)
-            } else {
-                ContextCompat.getColor(requireContext(), android.R.color.holo_red_dark)
-            }
-            binding.tvStatusIndicator.setTextColor(indicatorColor)
-        }
-
-        viewModel.lastUpdated.observe(viewLifecycleOwner) { timestamp ->
-            binding.tvLastUpdated.text = timestamp
-        }
-
-        // Don't show error toasts - status indicator and health tile provide visual feedback
+        // No UI elements to update - status dot in toolbar provides all feedback
+        // Future: Add observers here for Quick Stats and Favorites when implemented
     }
 
     override fun onDestroyView() {
