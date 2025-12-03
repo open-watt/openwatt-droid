@@ -4,7 +4,7 @@ import android.content.Intent
 import android.os.Bundle
 import androidx.appcompat.app.AppCompatActivity
 import com.openwatt.droid.repository.ServerRepository
-import com.openwatt.droid.ui.ConsoleActivity
+import com.openwatt.droid.ui.DashboardActivity
 import com.openwatt.droid.ui.ServerRegistrationActivity
 
 class MainActivity : AppCompatActivity() {
@@ -15,8 +15,8 @@ class MainActivity : AppCompatActivity() {
         val currentServer = serverRepository.getCurrentServer()
 
         if (currentServer != null) {
-            val intent = Intent(this, ConsoleActivity::class.java)
-            intent.putExtra(ConsoleActivity.EXTRA_SERVER_ID, currentServer.id)
+            val intent = Intent(this, DashboardActivity::class.java)
+            intent.putExtra(DashboardActivity.EXTRA_SERVER_ID, currentServer.id)
             startActivity(intent)
         } else {
             val intent = Intent(this, ServerRegistrationActivity::class.java)

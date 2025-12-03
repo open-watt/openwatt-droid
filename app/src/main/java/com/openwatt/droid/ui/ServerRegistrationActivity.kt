@@ -62,8 +62,9 @@ class ServerRegistrationActivity : AppCompatActivity() {
         viewModel.serverAdded.observe(this) { server ->
             Toast.makeText(this, "Server '${server.name}' added successfully", Toast.LENGTH_SHORT).show()
 
-            val intent = Intent(this, ConsoleActivity::class.java)
-            intent.putExtra(ConsoleActivity.EXTRA_SERVER_ID, server.id)
+            val intent = Intent(this, DashboardActivity::class.java)
+            intent.putExtra(DashboardActivity.EXTRA_SERVER_ID, server.id)
+            intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
             startActivity(intent)
             finish()
         }

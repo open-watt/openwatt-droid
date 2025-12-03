@@ -25,6 +25,9 @@
             android:name=".ui.ServerRegistrationActivity"
             android:exported="false" />
         <activity
+            android:name=".ui.DashboardActivity"
+            android:exported="false" />
+        <activity
             android:name=".ui.ConsoleActivity"
             android:exported="false" />
     </application>

@@ -23,6 +23,10 @@ class ConsoleActivity : AppCompatActivity() {
         binding = ActivityConsoleBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        setSupportActionBar(binding.toolbar)
+        supportActionBar?.setDisplayHomeAsUpEnabled(true)
+        supportActionBar?.setDisplayShowHomeEnabled(true)
+
         val serverId = intent.getStringExtra(EXTRA_SERVER_ID)
         if (serverId == null) {
             Toast.makeText(this, "No server selected", Toast.LENGTH_SHORT).show()
@@ -96,6 +100,11 @@ class ConsoleActivity : AppCompatActivity() {
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         return when (item.itemId) {
+            android.R.id.home -> {
+                // Back button pressed - return to dashboard
+                finish()
+                true
+            }
             R.id.action_disconnect -> {
                 disconnect()
                 true
