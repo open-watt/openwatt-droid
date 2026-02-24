@@ -19,6 +19,8 @@ import com.openwatt.droid.databinding.ToolbarTitleWithStatusBinding
 import com.openwatt.droid.model.Server
 import com.openwatt.droid.network.CliClient
 import com.openwatt.droid.repository.ServerRepository
+import com.openwatt.droid.ui.fragments.ConfigBrowserFragment
+import com.openwatt.droid.ui.fragments.DevicesFragment
 import com.openwatt.droid.ui.fragments.HomeFragment
 import com.openwatt.droid.viewmodel.DashboardViewModel
 import kotlinx.coroutines.Job
@@ -120,7 +122,7 @@ class DashboardActivity : AppCompatActivity() {
                 if (server.id != currentServerId) {
                     currentServerId = server.id
                     viewModel.switchToServer(server.id)
-                    loadFragment(HomeFragment.newInstance(server.id))
+                    reloadCurrentTab()
                 }
                 dialog.dismiss()
             }
@@ -180,7 +182,7 @@ class DashboardActivity : AppCompatActivity() {
                         currentServerId = nextServer.id
                         serverRepository.setCurrentServer(nextServer.id)
                         viewModel.switchToServer(nextServer.id)
-                        loadFragment(HomeFragment.newInstance(nextServer.id))
+                        reloadCurrentTab()
                         pickerDialog.dismiss()
                     } else {
                         // No servers left, go to registration
@@ -204,6 +206,7 @@ class DashboardActivity : AppCompatActivity() {
         binding.bottomNavigation.setOnItemSelectedListener { item ->
             when (item.itemId) {
                 R.id.nav_home -> {
+                    supportFragmentManager.popBackStack(null, androidx.fragment.app.FragmentManager.POP_BACK_STACK_INCLUSIVE)
                     loadFragment(HomeFragment.newInstance(currentServerId!!))
                     true
                 }
@@ -212,12 +215,15 @@ class DashboardActivity : AppCompatActivity() {
                     false
                 }
                 R.id.nav_devices -> {
-                    Toast.makeText(this, "Devices tab coming soon", Toast.LENGTH_SHORT).show()
-                    false
+                    supportFragmentManager.popBackStack(null, androidx.fragment.app.FragmentManager.POP_BACK_STACK_INCLUSIVE)
+                    loadFragment(DevicesFragment.newInstance(currentServerId!!))
+                    true
                 }
                 R.id.nav_config -> {
-                    Toast.makeText(this, "Config tab coming soon", Toast.LENGTH_SHORT).show()
-                    false
+                    // Clear back stack when switching to config tab
+                    supportFragmentManager.popBackStack(null, androidx.fragment.app.FragmentManager.POP_BACK_STACK_INCLUSIVE)
+                    loadFragment(ConfigBrowserFragment.newInstance(currentServerId!!))
+                    true
                 }
                 else -> false
             }
@@ -228,6 +234,16 @@ class DashboardActivity : AppCompatActivity() {
         supportFragmentManager.beginTransaction()
             .replace(R.id.nav_host_fragment, fragment)
             .commit()
+    }
+
+    private fun reloadCurrentTab() {
+        supportFragmentManager.popBackStack(null, androidx.fragment.app.FragmentManager.POP_BACK_STACK_INCLUSIVE)
+        val fragment = when (binding.bottomNavigation.selectedItemId) {
+            R.id.nav_devices -> DevicesFragment.newInstance(currentServerId!!)
+            R.id.nav_config -> ConfigBrowserFragment.newInstance(currentServerId!!)
+            else -> HomeFragment.newInstance(currentServerId!!)
+        }
+        loadFragment(fragment)
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {

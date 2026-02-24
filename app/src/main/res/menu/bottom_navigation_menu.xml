@@ -12,12 +12,12 @@
         android:title="Energy" />
     <item
         android:id="@+id/nav_devices"
-        android:enabled="false"
+        android:enabled="true"
         android:icon="@android:drawable/ic_menu_gallery"
         android:title="Devices" />
     <item
         android:id="@+id/nav_config"
-        android:enabled="false"
+        android:enabled="true"
         android:icon="@android:drawable/ic_menu_manage"
         android:title="Config" />
 </menu>

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Tags used by PropertyFieldFactory for enum/reference fields -->
+    <item name="tag_enum_map" type="id" />
+    <item name="tag_enum_name" type="id" />
+    <item name="tag_ref_type" type="id" />
+</resources>

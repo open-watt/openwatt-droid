@@ -7,4 +7,11 @@
     <color name="teal_700">#FF018786</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+
+    <!-- Device state indicator colors -->
+    <color name="state_ok">#FF16A34A</color>
+    <color name="state_warn">#FFEAB308</color>
+    <color name="state_error">#FFEF4444</color>
+    <color name="state_idle">#FF9CA3AF</color>
+    <color name="state_unknown">#FFD1D5DB</color>
 </resources>

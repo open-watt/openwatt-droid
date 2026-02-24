@@ -29,6 +29,29 @@ This Android app interfaces with OpenWatt via a **web API** implemented in the b
 - System status (list interfaces, streams, connections)
 - Configuration management (add/remove/modify runtime objects)
 
+## Companion Web Application (../openwatt-web)
+
+This Android app is a **companion to the OpenWatt Web application** (`../openwatt-web`). The web app is a fully-implemented vanilla JavaScript SPA that serves as the **feature reference** for this Android app. Many features are being migrated from web to Android.
+
+**Web app status:** The web app is feature-complete with server management, console, device monitoring, energy flow visualization, and a full configuration UI. Use it as the reference implementation when building equivalent Android features.
+
+**Key web app features (migration targets):**
+- **Device monitoring** — Device cards with archetypes, summary metrics, expandable component trees, real-time polling
+- **Energy dashboard** — Circuit tree visualization, appliance list, power flow diagram, history chart, smart-switch control
+- **Configuration UI** — Schema-driven floating window system for managing backend collections (list/add/edit/delete)
+- **Unit conversion** — SI prefix formatting, auto-scaling, duration formatting
+
+**Web app architecture (for comparison):**
+- Vanilla JS (ES6 modules), no frameworks, no build tools
+- `js/api/openwatt-client.js` — API client (same endpoints this app uses)
+- `js/models/device.js` — Device model, ARCHETYPES, FORMATTERS (port to Kotlin)
+- `js/ui/energy/` — Energy UI modules (summary, flow, chart, meters, nodes, details, switches)
+- `js/ui/devices.js` — Device list/detail rendering
+- `js/ui/router.js` + `js/ui/components/` — Config window system
+- `js/utils/unit-converter.js` — Unit parsing and formatting
+
+**When migrating features:** Use the `/web-app-reference` skill to look up web app implementation details, file locations, data structures, and API usage patterns. The skill contains a comprehensive map of the web app codebase.
+
 ## Technology Stack
 
 **Language:** Kotlin 2.0.21
