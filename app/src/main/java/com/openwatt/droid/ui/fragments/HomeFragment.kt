@@ -4,19 +4,19 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.Toast
-import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
-import androidx.fragment.app.activityViewModels
-import com.openwatt.droid.R
+import androidx.fragment.app.viewModels
+import androidx.recyclerview.widget.GridLayoutManager
 import com.openwatt.droid.databinding.FragmentHomeBinding
-import com.openwatt.droid.viewmodel.DashboardViewModel
+import com.openwatt.droid.ui.adapters.SwitchGridAdapter
+import com.openwatt.droid.viewmodel.HomeViewModel
 
 class HomeFragment : Fragment() {
     private var _binding: FragmentHomeBinding? = null
     private val binding get() = _binding!!
 
-    private val viewModel: DashboardViewModel by activityViewModels()
+    private val viewModel: HomeViewModel by viewModels()
+    private lateinit var adapter: SwitchGridAdapter
     private var serverId: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -27,7 +27,7 @@ class HomeFragment : Fragment() {
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
-        savedInstanceState: Bundle?
+        savedInstanceState: Bundle?,
     ): View {
         _binding = FragmentHomeBinding.inflate(inflater, container, false)
         return binding.root
@@ -36,18 +36,59 @@ class HomeFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
-        // ViewModel is shared with Activity, so it's already initialized
+        adapter = SwitchGridAdapter { deviceId, switchPath, currentValue ->
+            viewModel.toggleSwitch(deviceId, switchPath, currentValue)
+        }
+
+        binding.switchesRecycler.layoutManager = GridLayoutManager(requireContext(), 2)
+        binding.switchesRecycler.itemAnimator = null
+        binding.switchesRecycler.adapter = adapter
+
+        binding.btnSwitchesRetry.setOnClickListener {
+            viewModel.retry()
+        }
+
         observeViewModel()
+
+        serverId?.let { viewModel.initialize(it) }
     }
 
     private fun observeViewModel() {
-        // No UI elements to update - status dot in toolbar provides all feedback
-        // Future: Add observers here for Quick Stats and Favorites when implemented
+        viewModel.switches.observe(viewLifecycleOwner) { switches ->
+            adapter.submitList(switches.toList())
+
+            if (switches.isEmpty() && viewModel.isLoading.value != true && viewModel.error.value == null) {
+                binding.switchesEmpty.visibility = View.VISIBLE
+                binding.switchesRecycler.visibility = View.GONE
+            } else if (switches.isNotEmpty()) {
+                binding.switchesEmpty.visibility = View.GONE
+                binding.switchesRecycler.visibility = View.VISIBLE
+            }
+        }
+
+        viewModel.isLoading.observe(viewLifecycleOwner) { isLoading ->
+            binding.switchesLoading.visibility = if (isLoading) View.VISIBLE else View.GONE
+            if (isLoading) {
+                binding.switchesEmpty.visibility = View.GONE
+                binding.switchesError.visibility = View.GONE
+            }
+        }
+
+        viewModel.error.observe(viewLifecycleOwner) { error ->
+            if (error != null) {
+                binding.switchesError.visibility = View.VISIBLE
+                binding.switchesErrorMessage.text = error
+                binding.switchesRecycler.visibility = View.GONE
+                binding.switchesEmpty.visibility = View.GONE
+            } else {
+                binding.switchesError.visibility = View.GONE
+            }
+        }
     }
 
     override fun onDestroyView() {
         super.onDestroyView()
-        // Don't stop polling - Activity ViewModel manages lifecycle
+        viewModel.stopPolling()
         _binding = null
     }
 
