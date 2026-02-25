@@ -43,6 +43,13 @@ class Device(
     val ages = mutableMapOf<String, Double>()
     val info = mutableMapOf<String, Any?>()
     var expanded = false
+        set(value) {
+            if (field != value) { field = value; version++ }
+        }
+
+    /** Increments on every mutation; lets adapters skip unchanged items. */
+    var version = 0L
+        private set
 
     private var _archetype: DeviceArchetype? = null
 
@@ -130,6 +137,7 @@ class Device(
     /** Update values from API response */
     fun updateValues(data: Map<String, Map<String, Any?>>) {
         val prefix = "$id."
+        var changed = false
         for ((fullPath, entry) in data) {
             if (fullPath.startsWith(prefix)) {
                 val localPath = fullPath.removePrefix(prefix)
@@ -137,6 +145,7 @@ class Device(
                 val rawUnit = entry["unit"] as? String
 
                 val (resolvedValue, resolvedUnit) = com.openwatt.droid.util.UnitConverter.resolveQuantity(rawValue, rawUnit)
+                if (values[localPath] != resolvedValue) changed = true
                 values[localPath] = resolvedValue
                 resolvedUnit?.let { units[localPath] = it }
 
@@ -146,6 +155,7 @@ class Device(
                 }
             }
         }
+        if (changed) version++
     }
 
     /** Extract DeviceInfo from values */

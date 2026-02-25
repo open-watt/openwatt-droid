@@ -8,8 +8,6 @@ import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.content.ContextCompat
-import androidx.recyclerview.widget.DiffUtil
-import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.switchmaterial.SwitchMaterial
 import com.openwatt.droid.R
@@ -24,7 +22,47 @@ class DeviceListAdapter(
     private val onToggleExpand: (String) -> Unit,
     private val onToggleSwitch: (deviceId: String, switchPath: String, currentValue: Boolean) -> Unit,
     private val onEditValue: (deviceId: String, elementPath: String, elementName: String, currentValue: Any?, unit: String?) -> Unit,
-) : ListAdapter<Device, DeviceListAdapter.DeviceViewHolder>(DeviceDiffCallback()) {
+) : RecyclerView.Adapter<DeviceListAdapter.DeviceViewHolder>() {
+
+    private var devices: List<Device> = emptyList()
+    private var versions: Map<String, Long> = emptyMap()
+
+    fun submitList(newDevices: List<Device>) {
+        val oldDevices = devices
+        val oldVersions = versions
+        devices = newDevices
+        versions = newDevices.associate { it.id to it.version }
+
+        if (oldDevices.isEmpty()) {
+            notifyDataSetChanged()
+            return
+        }
+
+        // Diff by id and version — only rebind items that actually changed
+        val oldById = oldDevices.withIndex().associate { (i, d) -> d.id to i }
+        val newById = newDevices.withIndex().associate { (i, d) -> d.id to i }
+
+        // Removals (old items not in new list)
+        for ((id, oldPos) in oldById) {
+            if (id !in newById) notifyItemRemoved(oldPos)
+        }
+        // Insertions (new items not in old list)
+        for ((id, newPos) in newById) {
+            if (id !in oldById) notifyItemInserted(newPos)
+        }
+        // Changes (same item, different version)
+        for ((id, newPos) in newById) {
+            val oldPos = oldById[id] ?: continue
+            val oldVersion = oldVersions[id] ?: -1L
+            val newVersion = versions[id] ?: 0L
+            if (oldVersion != newVersion) {
+                if (oldPos != newPos) {
+                    notifyItemMoved(oldPos, newPos)
+                }
+                notifyItemChanged(newPos)
+            }
+        }
+    }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): DeviceViewHolder {
         val binding = ItemDeviceCardBinding.inflate(
@@ -34,8 +72,10 @@ class DeviceListAdapter(
     }
 
     override fun onBindViewHolder(holder: DeviceViewHolder, position: Int) {
-        holder.bind(getItem(position))
+        holder.bind(devices[position])
     }
+
+    override fun getItemCount(): Int = devices.size
 
     inner class DeviceViewHolder(
         private val binding: ItemDeviceCardBinding,
@@ -361,17 +401,6 @@ class DeviceListAdapter(
 
         private fun dpToPx(dp: Int): Int {
             return (dp * binding.root.context.resources.displayMetrics.density).toInt()
-        }
-    }
-
-    private class DeviceDiffCallback : DiffUtil.ItemCallback<Device>() {
-        override fun areItemsTheSame(oldItem: Device, newItem: Device): Boolean {
-            return oldItem.id == newItem.id
-        }
-
-        override fun areContentsTheSame(oldItem: Device, newItem: Device): Boolean {
-            // Always rebind to update live values
-            return false
         }
     }
 }

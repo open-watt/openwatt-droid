@@ -51,6 +51,7 @@ class DevicesFragment : Fragment() {
         )
 
         binding.devicesRecycler.layoutManager = LinearLayoutManager(requireContext())
+        binding.devicesRecycler.itemAnimator = null
         binding.devicesRecycler.adapter = adapter
 
         binding.btnRetry.setOnClickListener {
