@@ -11,8 +11,9 @@
         android:orientation="vertical"
         android:padding="12dp">
 
-        <!-- Section 1: Energy Flow (placeholder) -->
+        <!-- Section 1: Energy Flow -->
         <com.google.android.material.card.MaterialCardView
+            android:id="@+id/energyFlowCard"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginBottom="8dp"
@@ -21,40 +22,44 @@
             app:strokeWidth="1dp"
             app:strokeColor="@color/state_idle">
 
-            <LinearLayout
+            <FrameLayout
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:padding="16dp"
-                android:alpha="0.5">
+                android:layout_height="wrap_content">
 
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Energy Flow"
-                    android:textAppearance="?attr/textAppearanceSubtitle1"
-                    android:textStyle="bold" />
-
-                <TextView
+                <com.openwatt.droid.ui.energy.EnergyFlowCrossView
+                    android:id="@+id/energyFlowCross"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:text="Solar  \u2500\u2500\u25B6  Home  \u25C0\u2500\u2500  Grid\n              \u2502        \u2502\n          Battery    Car"
-                    android:fontFamily="monospace"
-                    android:textSize="13sp"
-                    android:textColor="?android:attr/textColorSecondary"
-                    android:gravity="center" />
+                    android:padding="4dp" />
 
-                <TextView
+                <LinearLayout
+                    android:id="@+id/energyFlowPlaceholder"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:text="Real-time energy flow visualization coming soon"
-                    android:textAppearance="?attr/textAppearanceCaption"
-                    android:textColor="?android:attr/textColorSecondary"
-                    android:gravity="center" />
+                    android:orientation="vertical"
+                    android:padding="16dp"
+                    android:alpha="0.5"
+                    android:visibility="gone">
 
-            </LinearLayout>
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Energy Flow"
+                        android:textAppearance="?attr/textAppearanceSubtitle1"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="Energy monitoring not configured on this server"
+                        android:textAppearance="?attr/textAppearanceCaption"
+                        android:textColor="?android:attr/textColorSecondary"
+                        android:gravity="center" />
+
+                </LinearLayout>
+
+            </FrameLayout>
 
         </com.google.android.material.card.MaterialCardView>
 

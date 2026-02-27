@@ -84,6 +84,23 @@ class HomeFragment : Fragment() {
                 binding.switchesError.visibility = View.GONE
             }
         }
+
+        viewModel.energyFlowState.observe(viewLifecycleOwner) { flowState ->
+            if (_binding == null) return@observe
+            if (flowState != null) {
+                binding.energyFlowCross.visibility = View.VISIBLE
+                binding.energyFlowPlaceholder.visibility = View.GONE
+                binding.energyFlowCross.setState(flowState)
+            }
+        }
+
+        viewModel.energyAvailable.observe(viewLifecycleOwner) { available ->
+            if (_binding == null) return@observe
+            if (!available) {
+                binding.energyFlowCross.visibility = View.GONE
+                binding.energyFlowPlaceholder.visibility = View.VISIBLE
+            }
+        }
     }
 
     override fun onDestroyView() {

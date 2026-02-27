@@ -9,6 +9,10 @@ import com.openwatt.droid.model.Archetypes
 import com.openwatt.droid.model.DeviceManager
 import com.openwatt.droid.model.HomeSwitch
 import com.openwatt.droid.model.ValueFormatter
+import com.openwatt.droid.model.energy.Appliance
+import com.openwatt.droid.model.energy.Circuit
+import com.openwatt.droid.model.energy.EnergyFlowState
+import com.openwatt.droid.model.energy.EvFlowState
 import com.openwatt.droid.network.OpenWattClient
 import com.openwatt.droid.repository.ServerRepository
 import kotlinx.coroutines.Job
@@ -28,6 +32,12 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _error = MutableLiveData<String?>()
     val error: LiveData<String?> = _error
+
+    private val _energyFlowState = MutableLiveData<EnergyFlowState?>(null)
+    val energyFlowState: LiveData<EnergyFlowState?> = _energyFlowState
+
+    private val _energyAvailable = MutableLiveData(true)
+    val energyAvailable: LiveData<Boolean> = _energyAvailable
 
     private var serverId: String? = null
     private var valuePollingJob: Job? = null
@@ -62,6 +72,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     // Fetch initial switch values
                     refreshSwitchValues()
                     _switches.value = buildSwitchList()
+
+                    // Fetch initial energy flow
+                    refreshEnergyFlow()
 
                     startPolling()
                 }.onFailure { e ->
@@ -143,13 +156,14 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private fun startPolling() {
         stopPolling()
 
-        // Fast poll: switch values every 2 seconds
+        // Fast poll: switch + energy values every 2 seconds
         valuePollingJob = viewModelScope.launch {
             while (true) {
                 delay(2000)
                 try {
                     refreshSwitchValues()
                     _switches.value = buildSwitchList()
+                    refreshEnergyFlow()
                 } catch (_: Exception) { }
             }
         }
@@ -216,6 +230,81 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun retry() {
         loadDevices()
+    }
+
+    // --- Energy flow ---
+
+    private suspend fun refreshEnergyFlow() {
+        val server = serverId?.let { serverRepository.getServer(it) } ?: return
+
+        val circuits = apiClient.getCircuits(server).getOrNull()
+        val appliances = apiClient.getAppliances(server).getOrNull()
+
+        if (circuits == null || circuits.isEmpty()) {
+            _energyAvailable.value = false
+            _energyFlowState.value = null
+            return
+        }
+
+        _energyAvailable.value = true
+        _energyFlowState.value = buildFlowState(circuits, appliances ?: emptyMap())
+    }
+
+    private fun buildFlowState(
+        circuits: Map<String, Circuit>,
+        appliances: Map<String, Appliance>,
+    ): EnergyFlowState {
+        // Grid power from main circuit meter
+        val mainCircuit = circuits.values.firstOrNull()
+        val gridPower = mainCircuit?.meterData?.powerWatts ?: 0.0
+
+        // Aggregate solar and battery MPPTs across all inverters
+        val solarMppts = appliances.values
+            .filter { it.type == "inverter" && it.inverter != null }
+            .flatMap { it.inverter!!.mppt.filter { m -> m.isSolar } }
+
+        val batteryMppts = appliances.values
+            .filter { it.type == "inverter" && it.inverter != null }
+            .flatMap { it.inverter!!.mppt.filter { m -> m.isBattery } }
+
+        val solarPower = if (solarMppts.isNotEmpty()) {
+            solarMppts.sumOf { it.meterData?.powerWatts ?: 0.0 }
+        } else null
+
+        val batteryPower = if (batteryMppts.isNotEmpty()) {
+            batteryMppts.sumOf { it.meterData?.powerWatts ?: 0.0 }
+        } else null
+
+        val batterySoc = if (batteryMppts.isNotEmpty()) {
+            val socs = batteryMppts.mapNotNull { it.soc }
+            if (socs.isNotEmpty()) socs.average() else null
+        } else null
+
+        // Collect individual EVs
+        val evList = appliances.values
+            .filter { it.type == "evse" && it.evse?.connectedCar != null }
+            .mapNotNull { evse ->
+                val carId = evse.evse!!.connectedCar!!
+                val car = appliances[carId]
+                EvFlowState(
+                    name = car?.name ?: evse.name ?: carId,
+                    power = car?.meterData?.powerWatts ?: evse.meterData?.powerWatts ?: 0.0,
+                    soc = null, // CarData doesn't expose SoC yet
+                )
+            }
+
+        // Home consumption = grid + solar + battery (net at the bus)
+        val homePower = gridPower + (solarPower ?: 0.0) + (batteryPower ?: 0.0)
+
+        return EnergyFlowState(
+            gridPower = gridPower,
+            solarPower = solarPower,
+            batteryPower = batteryPower,
+            batterySoc = batterySoc,
+            homePower = homePower,
+            evs = evList.ifEmpty { null },
+            gasPower = null, // Future
+        )
     }
 
     override fun onCleared() {

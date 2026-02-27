@@ -8,6 +8,9 @@ import com.openwatt.droid.model.ComponentStructure
 import com.openwatt.droid.model.ElementMeta
 import com.openwatt.droid.model.PropertySchema
 import com.openwatt.droid.model.Server
+import com.openwatt.droid.model.energy.Appliance
+import com.openwatt.droid.model.energy.Circuit
+import com.openwatt.droid.model.energy.EnergyParser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -193,6 +196,64 @@ class OpenWattClient {
                         else -> value.toString()
                     }
                 }
+                Result.success(result)
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Get energy circuit tree.
+     * GET /api/energy/circuit
+     * Returns map of circuit ID -> Circuit with nested sub-circuits and appliance refs.
+     */
+    suspend fun getCircuits(server: Server): Result<Map<String, Circuit>> = withContext(Dispatchers.IO) {
+        try {
+            val request = Request.Builder()
+                .url("${server.baseUrl}/api/energy/circuit")
+                .get()
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    return@withContext Result.failure(IOException("HTTP ${response.code}: ${response.message}"))
+                }
+
+                val responseBody = response.body?.string()
+                    ?: return@withContext Result.failure(IOException("Empty response body"))
+
+                val jsonObject = gson.fromJson(responseBody, JsonObject::class.java)
+                val result = EnergyParser.parseCircuits(jsonObject)
+                Result.success(result)
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Get energy appliances.
+     * GET /api/energy/appliances
+     * Returns map of appliance ID -> Appliance with type-specific data.
+     */
+    suspend fun getAppliances(server: Server): Result<Map<String, Appliance>> = withContext(Dispatchers.IO) {
+        try {
+            val request = Request.Builder()
+                .url("${server.baseUrl}/api/energy/appliances")
+                .get()
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    return@withContext Result.failure(IOException("HTTP ${response.code}: ${response.message}"))
+                }
+
+                val responseBody = response.body?.string()
+                    ?: return@withContext Result.failure(IOException("Empty response body"))
+
+                val jsonObject = gson.fromJson(responseBody, JsonObject::class.java)
+                val result = EnergyParser.parseAppliances(jsonObject)
                 Result.success(result)
             }
         } catch (e: Exception) {

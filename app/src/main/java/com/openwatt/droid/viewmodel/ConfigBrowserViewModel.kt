@@ -14,12 +14,17 @@ import kotlinx.coroutines.launch
  * Item in the browser list — either a group header or a collection leaf.
  */
 sealed class BrowserItem {
+    /** Nesting depth (0 = top-level) — used by the adapter for indentation. */
+    abstract val depth: Int
+
     data class Group(
+        val key: String,
         val name: String,
         val displayName: String,
         val icon: String,
         val expanded: Boolean,
         val childCount: Int,
+        override val depth: Int = 0,
     ) : BrowserItem()
 
     data class Leaf(
@@ -27,6 +32,7 @@ sealed class BrowserItem {
         val displayName: String,
         val icon: String,
         val path: String,
+        override val depth: Int = 0,
     ) : BrowserItem()
 }
 
@@ -67,7 +73,7 @@ class ConfigBrowserViewModel(application: Application) : AndroidViewModel(applic
                 apiClient.getSchema(server).onSuccess { loadedSchema ->
                     schema = loadedSchema
                     // Expand all groups by default
-                    expandedGroups.addAll(buildGroupNames())
+                    expandedGroups.addAll(buildGroupKeys())
                     rebuildItems()
                 }.onFailure { e ->
                     _error.value = e.message ?: "Failed to load schema"
@@ -101,40 +107,69 @@ class ConfigBrowserViewModel(application: Application) : AndroidViewModel(applic
     private fun rebuildItems() {
         val tree = buildPathTree()
         val items = mutableListOf<BrowserItem>()
+        flattenTree(tree, items, depth = 0, parentKey = "")
+        _items.value = items
+    }
 
-        for ((groupName, node) in tree.toSortedMap()) {
-            val collections = node.collections.sortedBy { it.label }
-            val childCount = collections.size
-            val isExpanded = expandedGroups.contains(groupName)
+    /**
+     * Recursively flatten the tree into the adapter list.
+     */
+    private fun flattenTree(
+        node: TreeNode,
+        items: MutableList<BrowserItem>,
+        depth: Int,
+        parentKey: String,
+    ) {
+        val childKeys = node.children.keys.sorted()
+        val collections = node.collections.sortedBy { it.label }
+
+        // Render child groups first (folders before files)
+        for (childName in childKeys) {
+            val child = node.children[childName] ?: continue
+            val totalCount = countDescendants(child)
+            if (totalCount == 0) continue
+
+            val key = if (parentKey.isEmpty()) childName else "$parentKey/$childName"
+            val isExpanded = expandedGroups.contains(key)
 
             items.add(
                 BrowserItem.Group(
-                    name = groupName,
-                    displayName = formatName(groupName),
-                    icon = getGroupIcon(groupName),
+                    key = key,
+                    name = childName,
+                    displayName = formatName(childName),
+                    icon = getGroupIcon(childName),
                     expanded = isExpanded,
-                    childCount = childCount,
+                    childCount = totalCount,
+                    depth = depth,
                 )
             )
 
             if (isExpanded) {
-                for (col in collections) {
-                    items.add(
-                        BrowserItem.Leaf(
-                            collectionName = col.name,
-                            displayName = formatName(col.label),
-                            icon = getCollectionIcon(col.name),
-                            path = col.schema.path,
-                        )
-                    )
-                }
+                flattenTree(child, items, depth + 1, key)
             }
         }
 
-        _items.value = items
+        // Then render leaf collections
+        for (col in collections) {
+            items.add(
+                BrowserItem.Leaf(
+                    collectionName = col.name,
+                    displayName = formatName(col.label),
+                    icon = getCollectionIcon(col.name),
+                    path = col.schema.path,
+                    depth = depth,
+                )
+            )
+        }
+    }
+
+    /** Count total leaf collections reachable from a node. */
+    private fun countDescendants(node: TreeNode): Int {
+        return node.collections.size + node.children.values.sumOf { countDescendants(it) }
     }
 
     private data class TreeNode(
+        val children: MutableMap<String, TreeNode> = mutableMapOf(),
         val collections: MutableList<CollectionEntry> = mutableListOf(),
     )
 
@@ -145,31 +180,42 @@ class ConfigBrowserViewModel(application: Application) : AndroidViewModel(applic
     )
 
     /**
-     * Build tree from collection paths.
-     * /interface/modbus → group="interface", leaf="modbus"
-     * /device → group="device", leaf="device"
+     * Build recursive tree from collection paths.
+     * /interface/modbus/Server → interface (group) → modbus (group) → Server (leaf)
+     * /device → device (leaf at root)
      */
-    private fun buildPathTree(): Map<String, TreeNode> {
-        val tree = mutableMapOf<String, TreeNode>()
+    private fun buildPathTree(): TreeNode {
+        val root = TreeNode()
 
         for ((name, collectionSchema) in schema) {
             val parts = collectionSchema.path.split("/").filter { it.isNotEmpty() }
             if (parts.isEmpty()) continue
 
-            val groupName = parts.first()
-            val leafLabel = if (parts.size > 1) parts.last() else parts.first()
+            // Walk intermediate path segments, creating child groups as needed
+            var node = root
+            for (i in 0 until parts.size - 1) {
+                node = node.children.getOrPut(parts[i]) { TreeNode() }
+            }
 
-            val node = tree.getOrPut(groupName) { TreeNode() }
-            node.collections.add(CollectionEntry(name, collectionSchema, leafLabel))
+            // Add collection at the deepest node
+            node.collections.add(CollectionEntry(name, collectionSchema, parts.last()))
         }
 
-        return tree
+        return root
     }
 
-    private fun buildGroupNames(): Set<String> {
-        return schema.values.mapNotNull { s ->
-            s.path.split("/").filter { it.isNotEmpty() }.firstOrNull()
-        }.toSet()
+    /** Build the set of all group keys for initial expansion. */
+    private fun buildGroupKeys(): Set<String> {
+        val keys = mutableSetOf<String>()
+        fun walk(node: TreeNode, parentKey: String) {
+            for ((childName, child) in node.children) {
+                val key = if (parentKey.isEmpty()) childName else "$parentKey/$childName"
+                keys.add(key)
+                walk(child, key)
+            }
+        }
+        walk(buildPathTree(), "")
+        return keys
     }
 
     private fun formatName(name: String): String {
@@ -181,7 +227,8 @@ class ConfigBrowserViewModel(application: Application) : AndroidViewModel(applic
     }
 
     private fun getGroupIcon(name: String): String {
-        return GROUP_ICONS[name.lowercase()] ?: "\uD83D\uDCC1" // 📁
+        val lower = name.lowercase()
+        return GROUP_ICONS[lower] ?: COLLECTION_ICONS[lower] ?: "\uD83D\uDCC1" // 📁
     }
 
     private fun getCollectionIcon(name: String): String {

@@ -50,8 +50,12 @@ class ConfigBrowserAdapter(
             binding.groupCount.text = "${group.childCount}"
             binding.expandArrow.text = if (group.expanded) "▾" else "▸"
 
+            // Indent based on depth (base 16dp + depth * 16dp)
+            val basePx = dpToPx(binding.root.context, 16 + group.depth * 16)
+            binding.root.setPadding(basePx, binding.root.paddingTop, binding.root.paddingRight, binding.root.paddingBottom)
+
             binding.root.setOnClickListener {
-                onGroupClick(group.name)
+                onGroupClick(group.key)
             }
         }
     }
@@ -64,10 +68,18 @@ class ConfigBrowserAdapter(
             binding.leafIcon.text = leaf.icon
             binding.leafName.text = leaf.displayName
 
+            // Indent based on depth (base 48dp + depth * 16dp)
+            val basePx = dpToPx(binding.root.context, 48 + leaf.depth * 16)
+            binding.root.setPadding(basePx, binding.root.paddingTop, binding.root.paddingRight, binding.root.paddingBottom)
+
             binding.root.setOnClickListener {
                 onLeafClick(leaf.collectionName)
             }
         }
+    }
+
+    private fun dpToPx(context: android.content.Context, dp: Int): Int {
+        return (dp * context.resources.displayMetrics.density).toInt()
     }
 
     companion object {
@@ -80,7 +92,7 @@ private class BrowserDiffCallback : DiffUtil.ItemCallback<BrowserItem>() {
     override fun areItemsTheSame(oldItem: BrowserItem, newItem: BrowserItem): Boolean {
         return when {
             oldItem is BrowserItem.Group && newItem is BrowserItem.Group ->
-                oldItem.name == newItem.name
+                oldItem.key == newItem.key
             oldItem is BrowserItem.Leaf && newItem is BrowserItem.Leaf ->
                 oldItem.collectionName == newItem.collectionName
             else -> false

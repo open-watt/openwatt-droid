@@ -21,6 +21,7 @@ import com.openwatt.droid.network.CliClient
 import com.openwatt.droid.repository.ServerRepository
 import com.openwatt.droid.ui.fragments.ConfigBrowserFragment
 import com.openwatt.droid.ui.fragments.DevicesFragment
+import com.openwatt.droid.ui.fragments.EnergyFragment
 import com.openwatt.droid.ui.fragments.HomeFragment
 import com.openwatt.droid.viewmodel.DashboardViewModel
 import kotlinx.coroutines.Job
@@ -211,8 +212,9 @@ class DashboardActivity : AppCompatActivity() {
                     true
                 }
                 R.id.nav_energy -> {
-                    Toast.makeText(this, "Energy tab coming soon", Toast.LENGTH_SHORT).show()
-                    false
+                    supportFragmentManager.popBackStack(null, androidx.fragment.app.FragmentManager.POP_BACK_STACK_INCLUSIVE)
+                    loadFragment(EnergyFragment.newInstance(currentServerId!!))
+                    true
                 }
                 R.id.nav_devices -> {
                     supportFragmentManager.popBackStack(null, androidx.fragment.app.FragmentManager.POP_BACK_STACK_INCLUSIVE)
@@ -239,6 +241,7 @@ class DashboardActivity : AppCompatActivity() {
     private fun reloadCurrentTab() {
         supportFragmentManager.popBackStack(null, androidx.fragment.app.FragmentManager.POP_BACK_STACK_INCLUSIVE)
         val fragment = when (binding.bottomNavigation.selectedItemId) {
+            R.id.nav_energy -> EnergyFragment.newInstance(currentServerId!!)
             R.id.nav_devices -> DevicesFragment.newInstance(currentServerId!!)
             R.id.nav_config -> ConfigBrowserFragment.newInstance(currentServerId!!)
             else -> HomeFragment.newInstance(currentServerId!!)

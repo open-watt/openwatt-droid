@@ -14,4 +14,16 @@
     <color name="state_error">#FFEF4444</color>
     <color name="state_idle">#FF9CA3AF</color>
     <color name="state_unknown">#FFD1D5DB</color>
+
+    <!-- Energy flow colors -->
+    <color name="energy_importing">#FFDC2626</color>
+    <color name="energy_exporting">#FF16A34A</color>
+    <color name="energy_idle">#FF94A3B8</color>
+    <color name="energy_chart_line">#FF2563EB</color>
+    <color name="energy_import_fill">#33DC2626</color>
+    <color name="energy_export_fill">#3316A34A</color>
+    <color name="energy_stub_bg">#FFFFF3CD</color>
+    <color name="energy_stub_text">#FF856404</color>
+    <color name="flow_connector">#FFE2E8F0</color>
+    <color name="flow_node_selected">#FF2563EB</color>
 </resources>
