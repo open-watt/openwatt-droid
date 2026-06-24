@@ -11,7 +11,10 @@ import com.openwatt.droid.model.SyncItem
 import com.openwatt.droid.network.CliClient
 import com.openwatt.droid.network.SyncClient
 import com.openwatt.droid.network.SyncClientManager
+import com.openwatt.droid.model.PropertySchema
 import com.openwatt.droid.repository.ServerRepository
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class ConfigEditorViewModel(application: Application) : AndroidViewModel(application) {
@@ -46,6 +49,17 @@ class ConfigEditorViewModel(application: Application) : AndroidViewModel(applica
     private var itemPattern: String? = null
     private var syncClient: SyncClient? = null
 
+    /** Read-only traffic/rate fields charted in the editor (auto-detected). */
+    private var chartKeys: List<String> = emptyList()
+    /** Each chart key's `-max` high-water counterpart, if the schema has one. */
+    private var chartMaxKeys: Map<String, String> = emptyMap()
+    /** Rate-history ring buffers for the open item: fieldKey -> samples. */
+    private val rateHistory = mutableMapOf<String, FloatArray>()
+    private var sampleJob: Job? = null
+
+    private val _rateHistoryVersion = MutableLiveData(0L)
+    val rateHistoryVersion: LiveData<Long> = _rateHistoryVersion
+
     private val storeObserver = Observer<Map<Int, SyncItem>> { snapshot ->
         val cid = itemCid ?: return@Observer
         _liveItem.value = snapshot[cid]
@@ -56,6 +70,25 @@ class ConfigEditorViewModel(application: Application) : AndroidViewModel(applica
         this.schema = schema
         val server = serverRepository.getServer(serverId) ?: return
         syncClient = SyncClientManager.get(server)
+
+        // Auto-detect chartable traffic metrics: read-only numeric/quantity
+        // fields that look like a rate or a timing/back-pressure measure.
+        chartKeys = schema.properties.entries
+            .filter { (key, prop) -> isChartable(key, prop) }
+            .map { it.key }
+        chartMaxKeys = chartKeys.associateWith { "$it-max" }
+            .filterValues { it in schema.properties.keys }
+    }
+
+    private fun isChartable(key: String, prop: PropertySchema): Boolean {
+        if (!prop.isReadOnly) return false
+        val type = prop.primaryType
+        val numeric = type == "num" || type == "int" || type == "uint" || type.startsWith("q_")
+        if (!numeric) return false
+        val k = key.lowercase()
+        if (k.endsWith("-max")) return false
+        return k.endsWith("-rate") || k.contains("queue") || k.contains("service") ||
+            k.contains("backpressure") || k.contains("back-pressure") || k.contains("latency")
     }
 
     /**
@@ -78,13 +111,69 @@ class ConfigEditorViewModel(application: Application) : AndroidViewModel(applica
         itemPattern = pattern
         client.subscribe(pattern)
         client.store.items.observeForever(storeObserver)
+        startRateSampling()
     }
 
     fun stopObserving() {
+        sampleJob?.cancel()
+        sampleJob = null
         val client = syncClient ?: return
         client.store.items.removeObserver(storeObserver)
         itemPattern?.let { client.unsubscribe(it) }
         itemPattern = null
+    }
+
+    /**
+     * Sample the open item's chartable fields on a fixed cadence so the ring
+     * buffers stay on an even time axis (sync pushes arrive at arbitrary rates).
+     */
+    private fun startRateSampling() {
+        sampleJob?.cancel()
+        if (chartKeys.isEmpty()) return
+        rateHistory.clear()
+        sampleJob = viewModelScope.launch {
+            while (true) {
+                delay(ConfigListViewModel.SAMPLE_INTERVAL_MS)
+                recordSample()
+            }
+        }
+    }
+
+    private fun recordSample() {
+        val cid = itemCid ?: return
+        val item = syncClient?.store?.getItem(cid) ?: return
+        val size = ConfigListViewModel.HISTORY_SIZE
+        for (key in chartKeys) {
+            val value = extractNumericValue(item.properties[key]) ?: continue
+            val buf = rateHistory.getOrPut(key) { FloatArray(size) }
+            System.arraycopy(buf, 1, buf, 0, size - 1)
+            buf[size - 1] = value
+            rateHistory[key] = buf
+        }
+        _rateHistoryVersion.value = (_rateHistoryVersion.value ?: 0) + 1
+    }
+
+    private fun extractNumericValue(value: Any?): Float? = when (value) {
+        is Number -> value.toFloat()
+        is Map<*, *> -> (value["q"] as? Number)?.toFloat()
+        else -> null
+    }
+
+    /** Chartable traffic field keys for the open item (empty if none). */
+    fun getChartKeys(): List<String> = chartKeys
+
+    /** Rate-history ring buffers for the open item, keyed by field. */
+    fun getRateHistory(): Map<String, FloatArray> = rateHistory
+
+    /** Backend high-water marks from `-max` fields, keyed by chart field. */
+    fun getHighWaterMarks(): Map<String, Float> {
+        if (chartMaxKeys.isEmpty()) return emptyMap()
+        val item = itemCid?.let { syncClient?.store?.getItem(it) } ?: return emptyMap()
+        val result = mutableMapOf<String, Float>()
+        for ((rateKey, maxKey) in chartMaxKeys) {
+            extractNumericValue(item.properties[maxKey])?.let { result[rateKey] = it }
+        }
+        return result
     }
 
     fun currentItem(): SyncItem? = itemCid?.let { syncClient?.store?.getItem(it) }

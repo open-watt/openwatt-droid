@@ -1,6 +1,7 @@
 package com.openwatt.droid.ui.fragments
 
 import android.app.AlertDialog
+import android.graphics.Typeface
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
@@ -10,6 +11,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
+import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
 import androidx.recyclerview.widget.RecyclerView
@@ -24,6 +26,7 @@ import com.openwatt.droid.model.PropertySchema
 import com.openwatt.droid.model.SyncItem
 import com.openwatt.droid.ui.config.FieldState
 import com.openwatt.droid.ui.config.PropertyFieldFactory
+import com.openwatt.droid.ui.config.SparklineView
 import com.openwatt.droid.viewmodel.ConfigEditorViewModel
 
 class ConfigEditorFragment : Fragment() {
@@ -52,6 +55,9 @@ class ConfigEditorFragment : Fragment() {
 
     /** Comment value (saved immediately, not part of dirty tracking) */
     private var commentValue: String = ""
+
+    /** Traffic charts in the current category page, keyed by field. */
+    private val chartViews = mutableMapOf<String, SparklineView>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -154,6 +160,7 @@ class ConfigEditorFragment : Fragment() {
                 fields.add(fv)
             }
             fieldViews["General"] = fields.toMutableList()
+            addTrafficCharts(container, entries)
 
             scrollView.addView(container)
 
@@ -197,6 +204,7 @@ class ConfigEditorFragment : Fragment() {
                         fields.add(fv)
                     }
                     fieldViews[catName] = fields.toMutableList()
+                    addTrafficCharts(holder.container, entries)
                 }
 
                 override fun getItemCount() = categoryNames.size
@@ -306,6 +314,60 @@ class ConfigEditorFragment : Fragment() {
         }
     }
 
+    /**
+     * Append larger traffic graphs to a category page for any chartable rate/
+     * timing fields it contains (rx-rate, tx-rate, queue/service time, …). The
+     * charts scroll with the page's fields and update from the editor VM's
+     * rate-history ring buffers.
+     */
+    private fun addTrafficCharts(container: LinearLayout, entries: List<Pair<String, PropertySchema>>) {
+        val chartKeys = entries.map { it.first }.filter { it in viewModel.getChartKeys() }
+        if (chartKeys.isEmpty()) return
+
+        container.addView(TextView(requireContext()).apply {
+            text = "Traffic"
+            textSize = 13f
+            setTypeface(null, Typeface.BOLD)
+            setPadding(0, dp(12), 0, dp(4))
+        })
+
+        for (key in chartKeys) {
+            container.addView(TextView(requireContext()).apply {
+                text = PropertyFieldFactory.formatLabel(key)
+                textSize = 11f
+                setPadding(0, dp(6), 0, dp(2))
+            })
+            val chart = SparklineView(requireContext()).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(110),
+                )
+                setColor(chartColor(key))
+            }
+            chartViews[key] = chart
+            container.addView(chart)
+        }
+        updateCharts()
+    }
+
+    private fun chartColor(key: String): Int {
+        val k = key.lowercase()
+        return when {
+            k.contains("rx") -> ContextCompat.getColor(requireContext(), R.color.state_ok)
+            k.contains("tx") -> 0xFF3B82F6.toInt()
+            else -> 0xFFF59E0B.toInt()
+        }
+    }
+
+    private fun updateCharts() {
+        if (chartViews.isEmpty()) return
+        val history = viewModel.getRateHistory()
+        val hwm = viewModel.getHighWaterMarks()
+        for ((key, chart) in chartViews) {
+            history[key]?.let { chart.setData(it.copyOf()) }
+            hwm[key]?.let { chart.setHighWaterMark(it) }
+        }
+    }
+
     private fun observeViewModel() {
         viewModel.enumLoaded.observe(viewLifecycleOwner) { (enumName, options) ->
             for (fields in fieldViews.values) {
@@ -389,6 +451,10 @@ class ConfigEditorFragment : Fragment() {
             if (result is ConfigEditorViewModel.SaveResult.Error) {
                 Snackbar.make(binding.root, "Comment: ${result.message}", Snackbar.LENGTH_LONG).show()
             }
+        }
+
+        viewModel.rateHistoryVersion.observe(viewLifecycleOwner) {
+            if (_binding != null) updateCharts()
         }
     }
 
@@ -483,6 +549,7 @@ class ConfigEditorFragment : Fragment() {
         fieldViews.clear()
         pendingEnumFields.clear()
         pendingRefFields.clear()
+        chartViews.clear()
         flagIndicators = null
         _binding = null
     }
