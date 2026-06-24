@@ -11,6 +11,7 @@ import android.widget.TextView
 import androidx.core.content.ContextCompat
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.switchmaterial.SwitchMaterial
+import com.google.android.material.textfield.MaterialAutoCompleteTextView
 import com.google.android.material.textfield.TextInputEditText
 import com.google.android.material.textfield.TextInputLayout
 import com.openwatt.droid.R
@@ -252,20 +253,30 @@ object PropertyFieldFactory {
         val wrapper = createFieldWrapper(context, key)
         val enumName = type.removePrefix("enum_")
 
-        val inputLayout = TextInputLayout(context).apply {
+        // Material "exposed dropdown menu" idiom: a non-editable text field
+        // with a chevron that opens a selection list. inputType=none + the
+        // endIconMode tell TextInputLayout to render this as a dropdown.
+        val inputLayout = TextInputLayout(
+            context,
+            null,
+            com.google.android.material.R.attr.textInputStyle,
+        ).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             )
             boxBackgroundMode = TextInputLayout.BOX_BACKGROUND_OUTLINE
+            endIconMode = TextInputLayout.END_ICON_DROPDOWN_MENU
         }
 
-        val autoComplete = AutoCompleteTextView(context).apply {
+        val autoComplete = MaterialAutoCompleteTextView(context).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             )
             isEnabled = !isReadOnly
+            inputType = InputType.TYPE_NULL // non-editable; pick from list only
+            keyListener = null              // disables software keyboard entirely
             setText(value?.toString() ?: "")
             tag = "enum_input" // marker for population
         }
@@ -310,15 +321,24 @@ object PropertyFieldFactory {
         val wrapper = createFieldWrapper(context, key)
         val refType = type.removePrefix("#")
 
-        val inputLayout = TextInputLayout(context).apply {
+        // Combobox idiom: editable text field (free-text ref name allowed)
+        // plus a chevron that opens the list of known items. Uses the same
+        // TextInputLayout + MaterialAutoCompleteTextView pairing as enum, but
+        // keeps inputType editable so typing still works.
+        val inputLayout = TextInputLayout(
+            context,
+            null,
+            com.google.android.material.R.attr.textInputStyle,
+        ).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             )
             boxBackgroundMode = TextInputLayout.BOX_BACKGROUND_OUTLINE
+            endIconMode = TextInputLayout.END_ICON_DROPDOWN_MENU
         }
 
-        val autoComplete = AutoCompleteTextView(context).apply {
+        val autoComplete = MaterialAutoCompleteTextView(context).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -638,7 +658,8 @@ object PropertyFieldFactory {
 
     fun formatLabel(key: String): String {
         return key
-            .replace("_", " ")
+            .replace('_', ' ')
+            .replace('-', ' ')
             .replace(Regex("([a-z])([A-Z])"), "$1 $2")
             .split(" ")
             .joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
@@ -677,7 +698,8 @@ object PropertyFieldFactory {
      */
     fun populateReferenceField(fieldView: View, suggestions: List<String>) {
         val autoComplete = fieldView.findViewWithTag<AutoCompleteTextView>("ref_input") ?: return
-        val adapter = ArrayAdapter(fieldView.context, android.R.layout.simple_dropdown_item_1line, suggestions)
+        val sorted = suggestions.sortedWith(String.CASE_INSENSITIVE_ORDER)
+        val adapter = ArrayAdapter(fieldView.context, android.R.layout.simple_dropdown_item_1line, sorted)
         autoComplete.setAdapter(adapter)
     }
 }

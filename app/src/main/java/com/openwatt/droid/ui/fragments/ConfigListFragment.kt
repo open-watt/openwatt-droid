@@ -11,11 +11,13 @@ import android.widget.PopupMenu
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
 import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.SimpleItemAnimator
 import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import com.openwatt.droid.R
 import com.openwatt.droid.databinding.FragmentConfigListBinding
-import com.openwatt.droid.model.CollectionItem
 import com.openwatt.droid.model.CollectionSchema
+import com.openwatt.droid.model.SyncItem
 import com.openwatt.droid.ui.adapters.ConfigListAdapter
 import com.openwatt.droid.viewmodel.ConfigListViewModel
 
@@ -30,6 +32,10 @@ class ConfigListFragment : Fragment() {
     private var collectionName: String? = null
     private var schema: CollectionSchema? = null
 
+    /** Non-abstract types sharing this collection's collection_id, keyed by type name.
+     *  Empty when the collection has no polymorphic members. */
+    private var memberTypes: Map<String, CollectionSchema> = emptyMap()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         serverId = arguments?.getString(ARG_SERVER_ID)
@@ -37,6 +43,12 @@ class ConfigListFragment : Fragment() {
 
         val schemaJson = arguments?.getString(ARG_SCHEMA_JSON)
         schema = schemaJson?.let { Gson().fromJson(it, CollectionSchema::class.java) }
+
+        val membersJson = arguments?.getString(ARG_MEMBER_TYPES_JSON)
+        if (membersJson != null) {
+            val type = object : TypeToken<Map<String, CollectionSchema>>() {}.type
+            memberTypes = Gson().fromJson(membersJson, type) ?: emptyMap()
+        }
     }
 
     override fun onCreateView(
@@ -53,26 +65,26 @@ class ConfigListFragment : Fragment() {
 
         val currentSchema = schema ?: return
 
-        // Toolbar
         binding.configListToolbar.title = formatName(collectionName ?: "Collection")
         binding.configListToolbar.setNavigationIcon(androidx.appcompat.R.drawable.abc_ic_ab_back_material)
         binding.configListToolbar.setNavigationOnClickListener {
             parentFragmentManager.popBackStack()
         }
 
-        // Adapter
         adapter = ConfigListAdapter(
             schema = currentSchema,
-            onItemClick = { item -> navigateToEditor(item) },
+            onItemClick = { item -> editItem(item.cid) },
             onItemLongClick = { item -> showContextMenu(item) },
         )
-        adapter.rateHistoryProvider = { itemName -> viewModel.getRateHistory(itemName) }
-        adapter.highWaterMarkProvider = { itemName -> viewModel.getHighWaterMarks(itemName) }
+        adapter.rateHistoryProvider = { cid -> viewModel.getRateHistory(cid) }
+        adapter.highWaterMarkProvider = { cid -> viewModel.getHighWaterMarks(cid) }
 
         binding.itemsRecycler.layoutManager = LinearLayoutManager(requireContext())
         binding.itemsRecycler.adapter = adapter
+        // Rate fields update constantly; the default fade-in-fade-out change
+        // animation would fire on every tick and the whole list would shimmer.
+        (binding.itemsRecycler.itemAnimator as? SimpleItemAnimator)?.supportsChangeAnimations = false
 
-        // Search
         binding.searchInput.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
@@ -81,12 +93,10 @@ class ConfigListFragment : Fragment() {
             }
         })
 
-        // FAB
         binding.fabAdd.setOnClickListener {
-            navigateToEditor(null)
+            showAddMenu()
         }
 
-        // Retry
         binding.btnRetry.setOnClickListener {
             viewModel.retry()
         }
@@ -95,6 +105,16 @@ class ConfigListFragment : Fragment() {
 
         serverId?.let { viewModel.initialize(it, currentSchema) }
         adapter.rateKeys = viewModel.getRateKeys()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        viewModel.resumeSubscription()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        viewModel.pauseSubscription()
     }
 
     private fun observeViewModel() {
@@ -137,19 +157,63 @@ class ConfigListFragment : Fragment() {
         }
     }
 
-    private fun navigateToEditor(item: CollectionItem?) {
+    /** Decide whether to show a type picker or go straight to the editor for a new item. */
+    private fun showAddMenu() {
+        val creatable = creatableTypes()
+        when (creatable.size) {
+            0 -> {
+                // Nothing instantiable here (all types abstract). Shouldn't normally happen.
+                return
+            }
+            1 -> navigateToEditor(null, creatable.values.first())
+            else -> {
+                val typeNames = creatable.keys.toList()
+                val labels = typeNames.map { formatName(it) }.toTypedArray()
+                AlertDialog.Builder(requireContext())
+                    .setTitle("Add ${formatName(collectionName ?: "Item")}")
+                    .setItems(labels) { _, which ->
+                        navigateToEditor(null, creatable[typeNames[which]]!!)
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+        }
+    }
+
+    /** Non-abstract schemas available for creation in this collection. */
+    private fun creatableTypes(): Map<String, CollectionSchema> {
+        val main = schema ?: return emptyMap()
+        val pool = if (memberTypes.isNotEmpty()) memberTypes else mapOf((collectionName ?: main.path) to main)
+        return pool.filterValues { !it.abstract }
+    }
+
+    /** Look up the schema for an existing item by its sync type, with fallbacks. */
+    private fun schemaForItem(cid: Int): CollectionSchema {
+        val main = schema!!
+        val type = viewModel.getItem(cid)?.type ?: return main
+        if (type.isEmpty()) return main
+        memberTypes[type]?.let { return it }
+        memberTypes.entries.firstOrNull { it.key.equals(type, ignoreCase = true) }?.let { return it.value }
+        return main
+    }
+
+    private fun navigateToEditor(cid: Int?, typeSchema: CollectionSchema) {
         val sid = serverId ?: return
         val name = collectionName ?: return
-        val currentSchema = schema ?: return
 
-        val fragment = ConfigEditorFragment.newInstance(sid, name, currentSchema, item)
+        val fragment = ConfigEditorFragment.newInstance(sid, name, typeSchema, cid)
         parentFragmentManager.beginTransaction()
             .replace(id, fragment)
             .addToBackStack(null)
             .commit()
     }
 
-    private fun showContextMenu(item: CollectionItem) {
+    /** Edit path for an existing item: resolve the correct schema by item type. */
+    private fun editItem(cid: Int) {
+        navigateToEditor(cid, schemaForItem(cid))
+    }
+
+    private fun showContextMenu(item: SyncItem) {
         val anchor = binding.itemsRecycler.findViewHolderForAdapterPosition(
             adapter.currentList.indexOf(item)
         )?.itemView ?: return
@@ -160,7 +224,7 @@ class ConfigListFragment : Fragment() {
             setOnMenuItemClickListener { menuItem ->
                 when (menuItem.itemId) {
                     MENU_EDIT -> {
-                        navigateToEditor(item)
+                        editItem(item.cid)
                         true
                     }
                     MENU_DELETE -> {
@@ -174,12 +238,12 @@ class ConfigListFragment : Fragment() {
         }
     }
 
-    private fun confirmDelete(item: CollectionItem) {
+    private fun confirmDelete(item: SyncItem) {
         AlertDialog.Builder(requireContext())
             .setTitle("Delete Item")
-            .setMessage("Delete \"${item.name}\"?")
+            .setMessage("Delete \"${item.name ?: "#${item.cid}"}\"?")
             .setPositiveButton("Delete") { _, _ ->
-                viewModel.deleteItem(item.name)
+                viewModel.deleteItem(item.cid)
             }
             .setNegativeButton("Cancel", null)
             .show()
@@ -187,7 +251,8 @@ class ConfigListFragment : Fragment() {
 
     private fun formatName(name: String): String {
         return name
-            .replace("_", " ")
+            .replace('_', ' ')
+            .replace('-', ' ')
             .replace(Regex("([a-z])([A-Z])"), "$1 $2")
             .split(" ")
             .joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
@@ -195,7 +260,6 @@ class ConfigListFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
-        viewModel.stopPolling()
         _binding = null
     }
 
@@ -203,6 +267,7 @@ class ConfigListFragment : Fragment() {
         private const val ARG_SERVER_ID = "server_id"
         private const val ARG_COLLECTION_NAME = "collection_name"
         private const val ARG_SCHEMA_JSON = "schema_json"
+        private const val ARG_MEMBER_TYPES_JSON = "member_types_json"
 
         private const val MENU_EDIT = 1
         private const val MENU_DELETE = 2
@@ -211,12 +276,16 @@ class ConfigListFragment : Fragment() {
             serverId: String,
             collectionName: String,
             schema: CollectionSchema,
+            memberTypes: Map<String, CollectionSchema> = emptyMap(),
         ): ConfigListFragment {
             return ConfigListFragment().apply {
                 arguments = Bundle().apply {
                     putString(ARG_SERVER_ID, serverId)
                     putString(ARG_COLLECTION_NAME, collectionName)
                     putString(ARG_SCHEMA_JSON, Gson().toJson(schema))
+                    if (memberTypes.isNotEmpty()) {
+                        putString(ARG_MEMBER_TYPES_JSON, Gson().toJson(memberTypes))
+                    }
                 }
             }
         }

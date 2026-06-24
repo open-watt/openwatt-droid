@@ -68,8 +68,10 @@ class ConfigBrowserAdapter(
             binding.leafIcon.text = leaf.icon
             binding.leafName.text = leaf.displayName
 
-            // Indent based on depth (base 48dp + depth * 16dp)
-            val basePx = dpToPx(binding.root.context, 48 + leaf.depth * 16)
+            // Match the group's indent formula so leaves at the same depth
+            // align with group headers, rather than being pushed an extra
+            // level in as if they lived inside an invisible folder.
+            val basePx = dpToPx(binding.root.context, 16 + leaf.depth * 16)
             binding.root.setPadding(basePx, binding.root.paddingTop, binding.root.paddingRight, binding.root.paddingBottom)
 
             binding.root.setOnClickListener {

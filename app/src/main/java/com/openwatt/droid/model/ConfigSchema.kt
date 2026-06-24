@@ -7,6 +7,14 @@ package com.openwatt.droid.model
 data class CollectionSchema(
     val path: String,
     val properties: Map<String, PropertySchema>,
+    /** True = collection root (shown in nav). False = a member type within a parent collection. */
+    val collection: Boolean,
+    /** True = cannot be instantiated directly (container-only). */
+    val abstract: Boolean,
+    /** Numeric collection identifier (0–63). Encoded in top 6 bits of item CIDs. */
+    val collectionId: Int,
+    /** Type-name string — matches the `type` field in sync bind/create messages. */
+    val typeName: String = "",
 )
 
 /**

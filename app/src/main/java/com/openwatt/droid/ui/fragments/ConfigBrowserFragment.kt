@@ -90,7 +90,11 @@ class ConfigBrowserFragment : Fragment() {
         val schema = viewModel.getSchema(collectionName) ?: return
         val sid = serverId ?: return
 
-        val fragment = ConfigListFragment.newInstance(sid, collectionName, schema)
+        // Include any sibling member types (polymorphic collections) so the list
+        // can offer a type picker on Add and resolve per-item schemas on Edit.
+        val memberTypes = viewModel.getMemberTypes(schema.collectionId).toMap()
+
+        val fragment = ConfigListFragment.newInstance(sid, collectionName, schema, memberTypes)
         parentFragmentManager.beginTransaction()
             .replace(id, fragment)
             .addToBackStack(null)

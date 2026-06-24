@@ -101,6 +101,25 @@ class OpenWattClient {
     }
 
     /**
+     * Fetch the energy circuit + island element model in one request.
+     *
+     * Energy state is published as elements on the synthetic `energy` device;
+     * the old `GET /api/energy/circuit` endpoint has been retired on the
+     * backend. The flat path->value result is reshaped into the circuit graph
+     * by the energy model layer. Mirrors the web client's `getEnergyElements`.
+     */
+    suspend fun getEnergyElements(server: Server): Result<Map<String, Map<String, Any?>>> =
+        getValues(server, listOf("energy.circuit.*", "energy.islands.*"))
+
+    /**
+     * Fetch the planner element model (policies + allocations). Fetched
+     * separately from [getEnergyElements] so a planner outage can't break the
+     * energy/flow views. Mirrors the web client's `getPlannerElements`.
+     */
+    suspend fun getPlannerElements(server: Server): Result<Map<String, Map<String, Any?>>> =
+        getValues(server, listOf("energy.policy.*", "energy.allocation.*"))
+
+    /**
      * Set element values.
      * POST /api/set { "values": { "path": value, ... } }
      */
@@ -161,53 +180,16 @@ class OpenWattClient {
     }
 
     /**
-     * Get enum values by name.
-     * GET /api/enum/{name}
-     * Returns map of display name -> numeric value
-     */
-    suspend fun getEnum(
-        server: Server,
-        enumName: String,
-    ): Result<Map<String, Any>> = withContext(Dispatchers.IO) {
-        try {
-            val request = Request.Builder()
-                .url("${server.baseUrl}/api/enum/${enumName}")
-                .get()
-                .build()
-
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    return@withContext Result.failure(IOException("HTTP ${response.code}: ${response.message}"))
-                }
-
-                val responseBody = response.body?.string()
-                    ?: return@withContext Result.failure(IOException("Empty response body"))
-
-                // Response is {EnumName: {key: value, ...}} — unwrap the outer object
-                val jsonObject = gson.fromJson(responseBody, JsonObject::class.java)
-                val inner = jsonObject.entrySet().firstOrNull()?.value?.asJsonObject
-                    ?: return@withContext Result.success(emptyMap())
-
-                val result = mutableMapOf<String, Any>()
-                for ((key, value) in inner.entrySet()) {
-                    result[key] = when {
-                        value.isJsonPrimitive && value.asJsonPrimitive.isNumber -> value.asNumber
-                        value.isJsonPrimitive -> value.asString
-                        else -> value.toString()
-                    }
-                }
-                Result.success(result)
-            }
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
-
-    /**
      * Get energy circuit tree.
      * GET /api/energy/circuit
      * Returns map of circuit ID -> Circuit with nested sub-circuits and appliance refs.
      */
+    @Deprecated(
+        "The /api/energy/* endpoints have been retired on the backend. Energy state is now " +
+            "published as elements on the `energy` device — use getEnergyElements(). The remaining " +
+            "callers (Home/Energy view-models) are slated for rebuild on the circuit.* element model.",
+        ReplaceWith("getEnergyElements(server)"),
+    )
     suspend fun getCircuits(server: Server): Result<Map<String, Circuit>> = withContext(Dispatchers.IO) {
         try {
             val request = Request.Builder()
@@ -237,6 +219,12 @@ class OpenWattClient {
      * GET /api/energy/appliances
      * Returns map of appliance ID -> Appliance with type-specific data.
      */
+    @Deprecated(
+        "The /api/energy/* endpoints have been retired on the backend. Appliances are now derived " +
+            "from circuit.terminal.* elements — use getEnergyElements(). The remaining callers " +
+            "(Home/Energy view-models) are slated for rebuild on the circuit.* element model.",
+        ReplaceWith("getEnergyElements(server)"),
+    )
     suspend fun getAppliances(server: Server): Result<Map<String, Appliance>> = withContext(Dispatchers.IO) {
         try {
             val request = Request.Builder()
@@ -272,6 +260,9 @@ class OpenWattClient {
 
             val path = obj.get("path")?.asString ?: continue
             val propertiesJson = obj.getAsJsonObject("properties") ?: continue
+            val isCollection = obj.get("collection")?.takeIf { !it.isJsonNull }?.asBoolean ?: false
+            val isAbstract = obj.get("abstract")?.takeIf { !it.isJsonNull }?.asBoolean ?: false
+            val collectionId = obj.get("collection_id")?.takeIf { !it.isJsonNull }?.asInt ?: 0
 
             val properties = mutableMapOf<String, PropertySchema>()
             for ((propName, propJson) in propertiesJson.entrySet()) {
@@ -301,7 +292,14 @@ class OpenWattClient {
                 )
             }
 
-            result[collectionName] = CollectionSchema(path = path, properties = properties)
+            result[collectionName] = CollectionSchema(
+                path = path,
+                properties = properties,
+                collection = isCollection,
+                abstract = isAbstract,
+                collectionId = collectionId,
+                typeName = collectionName,
+            )
         }
         return result
     }

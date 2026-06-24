@@ -4,20 +4,19 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
+import androidx.lifecycle.Observer
 import androidx.lifecycle.viewModelScope
-import com.openwatt.droid.model.CollectionItem
 import com.openwatt.droid.model.CollectionSchema
+import com.openwatt.droid.model.SyncItem
 import com.openwatt.droid.network.CliClient
-import com.openwatt.droid.network.OpenWattClient
+import com.openwatt.droid.network.SyncClient
+import com.openwatt.droid.network.SyncClientManager
 import com.openwatt.droid.repository.ServerRepository
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class ConfigEditorViewModel(application: Application) : AndroidViewModel(application) {
     private val serverRepository = ServerRepository(application)
     private val cliClient = CliClient()
-    private val apiClient = OpenWattClient()
 
     private val _saveResult = MutableLiveData<SaveResult?>()
     val saveResult: LiveData<SaveResult?> = _saveResult
@@ -34,70 +33,87 @@ class ConfigEditorViewModel(application: Application) : AndroidViewModel(applica
     private val _refLoaded = MutableLiveData<Pair<String, List<String>>>()
     val refLoaded: LiveData<Pair<String, List<String>>> = _refLoaded
 
-    /** Emits updated item data from polling (for refreshing non-dirty fields) */
-    private val _liveItem = MutableLiveData<CollectionItem?>()
-    val liveItem: LiveData<CollectionItem?> = _liveItem
+    /** Emits updated item from the sync store (for refreshing non-dirty fields) */
+    private val _liveItem = MutableLiveData<SyncItem?>()
+    val liveItem: LiveData<SyncItem?> = _liveItem
+
+    private val _commentResult = MutableLiveData<SaveResult?>()
+    val commentResult: LiveData<SaveResult?> = _commentResult
 
     private var serverId: String? = null
     private var schema: CollectionSchema? = null
-    private var itemName: String? = null
-    private var pollingJob: Job? = null
+    private var itemCid: Int? = null
+    private var itemPattern: String? = null
+    private var syncClient: SyncClient? = null
+
+    private val storeObserver = Observer<Map<Int, SyncItem>> { snapshot ->
+        val cid = itemCid ?: return@Observer
+        _liveItem.value = snapshot[cid]
+    }
 
     fun initialize(serverId: String, schema: CollectionSchema) {
         this.serverId = serverId
         this.schema = schema
-    }
-
-    /** Start polling for live updates to an existing item */
-    fun startPolling(name: String) {
-        this.itemName = name
-        stopPolling()
-        pollingJob = viewModelScope.launch {
-            while (true) {
-                delay(2000)
-                pollItem()
-            }
-        }
-    }
-
-    fun stopPolling() {
-        pollingJob?.cancel()
-        pollingJob = null
-    }
-
-    private suspend fun pollItem() {
-        val server = serverId?.let { serverRepository.getServer(it) } ?: return
-        val path = schema?.path ?: return
-        val name = itemName ?: return
-
-        try {
-            cliClient.listCollection(server, path).onSuccess { items ->
-                val updated = items.find { it.name == name }
-                if (updated != null) {
-                    _liveItem.value = updated
-                }
-            }
-        } catch (_: Exception) {
-            // Silently continue polling
-        }
-    }
-
-    override fun onCleared() {
-        super.onCleared()
-        stopPolling()
+        val server = serverRepository.getServer(serverId) ?: return
+        syncClient = SyncClientManager.get(server)
     }
 
     /**
-     * Save an item (create new or update existing).
+     * Start observing live updates for a single item by CID. Installs a
+     * narrow `#<cid>` subscription so the server only pushes updates for
+     * this one item while the editor is open. Idempotent against repeat
+     * calls for the same CID (the fragment currently calls twice).
+     *
+     * NOTE: `#<cid>` is stable only until a rename — a rename triggers a
+     * rekey event on the server. Rekey handling isn't implemented yet, so
+     * renaming an item while it's open in the editor will orphan this sub.
+     */
+    fun startObserving(cid: Int) {
+        if (itemCid == cid && itemPattern != null) return
+        stopObserving()
+        itemCid = cid
+        val client = syncClient ?: return
+        _liveItem.value = client.store.getItem(cid)
+        val pattern = "#$cid"
+        itemPattern = pattern
+        client.subscribe(pattern)
+        client.store.items.observeForever(storeObserver)
+    }
+
+    fun stopObserving() {
+        val client = syncClient ?: return
+        client.store.items.removeObserver(storeObserver)
+        itemPattern?.let { client.unsubscribe(it) }
+        itemPattern = null
+    }
+
+    fun currentItem(): SyncItem? = itemCid?.let { syncClient?.store?.getItem(it) }
+
+    override fun onCleared() {
+        super.onCleared()
+        stopObserving()
+    }
+
+    /**
+     * Save an item.
+     *
+     * For new items: send `create{type, props}` over the sync socket; the
+     * matching `bind{seq}` installs the proxy and returns the new CID.
+     *
+     * For existing items: iterate dirty fields and send set / reset over the
+     * sync socket. The server echoes each change back via the store, so the
+     * UI stays in sync with no round-trip polling.
      */
     fun save(
         isNew: Boolean,
-        originalName: String?,
         values: Map<String, Any?>,
-        originalItem: CollectionItem?,
+        originalItem: SyncItem?,
     ) {
-        val server = serverId?.let { serverRepository.getServer(it) } ?: return
-        val path = schema?.path ?: return
+        val client = syncClient
+        if (client == null) {
+            _saveResult.value = SaveResult.Error("No sync client")
+            return
+        }
 
         viewModelScope.launch {
             _isSaving.value = true
@@ -105,51 +121,47 @@ class ConfigEditorViewModel(application: Application) : AndroidViewModel(applica
 
             try {
                 if (isNew) {
-                    cliClient.addItem(server, path, values).onSuccess {
+                    val typeName = schema?.typeName.orEmpty()
+                    if (typeName.isEmpty()) {
+                        _saveResult.value = SaveResult.Error("Schema has no type name")
+                        return@launch
+                    }
+                    val props = values.entries
+                        .filter { (k, v) ->
+                            k != "flags" && k != "_originalName" && v != null &&
+                                (v !is String || v.isNotEmpty())
+                        }
+                        .associate { (k, v) -> k to coerceForWire(v) }
+
+                    client.create(typeName, props).onSuccess {
                         _saveResult.value = SaveResult.Success
                     }.onFailure { e ->
                         _saveResult.value = SaveResult.Error(e.message ?: "Failed to add item")
                     }
                 } else {
-                    val name = originalName ?: return@launch
-
-                    // Separate values into set and reset operations
-                    val setProps = mutableMapOf<String, Any?>()
-                    val resetKeys = mutableListOf<String>()
+                    val cid = itemCid
+                    if (cid == null) {
+                        _saveResult.value = SaveResult.Error("No target item")
+                        return@launch
+                    }
 
                     for ((key, value) in values) {
-                        if (key == "name") continue // Don't set name via set command
+                        if (key == "flags") continue // read-only
 
                         val strValue = value?.toString() ?: ""
                         val originalValue = originalItem?.properties?.get(key)
 
-                        if (strValue.isEmpty() && originalValue != null && originalValue.toString().isNotEmpty()) {
-                            // Value was cleared — reset it
-                            resetKeys.add(key)
+                        if (strValue.isEmpty() && originalValue != null &&
+                            originalValue.toString().isNotEmpty()
+                        ) {
+                            // Field was cleared — reset to default
+                            client.resetProperty(cid, key)
                         } else if (strValue.isNotEmpty()) {
-                            setProps[key] = value
+                            client.setProperty(cid, key, coerceForWire(value))
                         }
                     }
 
-                    var success = true
-
-                    if (setProps.isNotEmpty()) {
-                        cliClient.setItem(server, path, name, setProps).onFailure { e ->
-                            _saveResult.value = SaveResult.Error(e.message ?: "Failed to update item")
-                            success = false
-                        }
-                    }
-
-                    if (success && resetKeys.isNotEmpty()) {
-                        cliClient.resetItem(server, path, name, resetKeys).onFailure { e ->
-                            _saveResult.value = SaveResult.Error(e.message ?: "Failed to reset properties")
-                            success = false
-                        }
-                    }
-
-                    if (success) {
-                        _saveResult.value = SaveResult.Success
-                    }
+                    _saveResult.value = SaveResult.Success
                 }
             } catch (e: Exception) {
                 _saveResult.value = SaveResult.Error(e.message ?: "Save failed")
@@ -160,24 +172,37 @@ class ConfigEditorViewModel(application: Application) : AndroidViewModel(applica
     }
 
     /**
-     * Load enum values asynchronously.
+     * Coerce form-field values into types the sync API expects on the wire.
+     * Strings that parse cleanly as numbers/booleans are converted; everything
+     * else passes through so the backend can handle unit-suffixed strings etc.
+     */
+    private fun coerceForWire(value: Any?): Any? {
+        if (value !is String) return value
+        when (value.lowercase()) {
+            "true" -> return true
+            "false" -> return false
+        }
+        value.toLongOrNull()?.let { return it }
+        value.toDoubleOrNull()?.let { return it }
+        return value
+    }
+
+    /**
+     * Load enum values asynchronously via the sync socket.
      */
     fun loadEnum(enumName: String) {
-        // Check cache first
         enumCache[enumName]?.let {
             _enumLoaded.value = enumName to it
             return
         }
 
-        val server = serverId?.let { serverRepository.getServer(it) } ?: return
+        val client = syncClient ?: return
 
         viewModelScope.launch {
             try {
-                apiClient.getEnum(server, enumName).onSuccess { options ->
-                    @Suppress("UNCHECKED_CAST")
-                    val typedOptions = options as Map<String, Any>
-                    enumCache[enumName] = typedOptions
-                    _enumLoaded.value = enumName to typedOptions
+                client.getEnum(enumName).onSuccess { options ->
+                    enumCache[enumName] = options
+                    _enumLoaded.value = enumName to options
                 }
             } catch (_: Exception) {
                 // Silently fail — field will show raw value
@@ -187,15 +212,13 @@ class ConfigEditorViewModel(application: Application) : AndroidViewModel(applica
 
     /**
      * Load collection items for reference field suggestions.
+     * This remains HTTP-based since we just need a one-shot list of names.
      */
     fun loadCollectionRef(refType: String) {
         val server = serverId?.let { serverRepository.getServer(it) } ?: return
 
-        // Try to find the collection path from schema — we don't have the full schema map here,
-        // so we'll try the common pattern of /refType as the path
         viewModelScope.launch {
             try {
-                // Try loading via schema path pattern
                 cliClient.listCollection(server, "/$refType").onSuccess { items ->
                     val names = items.map { it.name }
                     _refLoaded.value = refType to names
@@ -206,36 +229,20 @@ class ConfigEditorViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
-    private val _commentResult = MutableLiveData<SaveResult?>()
-    val commentResult: LiveData<SaveResult?> = _commentResult
-
     /**
-     * Set comment on an existing item immediately (no dirty tracking needed).
+     * Set/clear the comment on an existing item immediately.
      */
-    fun setComment(itemName: String, comment: String) {
-        val server = serverId?.let { serverRepository.getServer(it) } ?: return
-        val path = schema?.path ?: return
+    fun setComment(comment: String) {
+        val cid = itemCid ?: return
+        val client = syncClient ?: return
 
-        viewModelScope.launch {
-            val command = if (comment.isNotEmpty()) {
-                // Only quote if the value contains spaces or quotes
-                val needsQuoting = comment.contains(' ') || comment.contains('"')
-                val arg = if (needsQuoting) {
-                    "comment=\"${comment.replace("\"", "\\\"")}\""
-                } else {
-                    "comment=$comment"
-                }
-                "$path/set $itemName $arg"
-            } else {
-                "$path/reset $itemName comment"
-            }
-            cliClient.executeCommand(server, command).onSuccess {
-                _commentResult.value = SaveResult.Success
-            }.onFailure { e ->
-                _commentResult.value = SaveResult.Error(e.message ?: "Failed to save comment")
-            }
-            _commentResult.value = null
+        if (comment.isNotEmpty()) {
+            client.setProperty(cid, "comment", comment)
+        } else {
+            client.resetProperty(cid, "comment")
         }
+        _commentResult.value = SaveResult.Success
+        _commentResult.value = null
     }
 
     fun clearSaveResult() {

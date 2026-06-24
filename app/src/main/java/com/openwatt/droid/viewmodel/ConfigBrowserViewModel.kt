@@ -4,9 +4,12 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
+import androidx.lifecycle.Observer
 import androidx.lifecycle.viewModelScope
 import com.openwatt.droid.model.CollectionSchema
 import com.openwatt.droid.network.OpenWattClient
+import com.openwatt.droid.network.SyncClient
+import com.openwatt.droid.network.SyncClientManager
 import com.openwatt.droid.repository.ServerRepository
 import kotlinx.coroutines.launch
 
@@ -57,9 +60,37 @@ class ConfigBrowserViewModel(application: Application) : AndroidViewModel(applic
 
     private var serverId: String? = null
 
+    /** The sync client whose connection we watch so we can refresh the schema. */
+    private var syncClient: SyncClient? = null
+    private var lastConnected: Boolean? = null
+    private var initialLoadDone = false
+
+    /**
+     * Reload the schema whenever the sync socket reconnects (false -> true).
+     * The backend may have been upgraded while we were offline, so the schema —
+     * and the sync defaults primed from it — could have changed. Mirrors the web
+     * app, which reloads its schema on every server online/restart event. The
+     * `initialLoadDone` gate avoids a redundant reload on the very first connect,
+     * since [initialize] already kicks off the initial load.
+     */
+    private val connectedObserver = Observer<Boolean> { connected ->
+        val wasConnected = lastConnected
+        lastConnected = connected
+        if (wasConnected == false && connected && initialLoadDone) {
+            loadSchema()
+        }
+    }
+
     fun initialize(serverId: String) {
         this.serverId = serverId
         loadSchema()
+        val server = serverRepository.getServer(serverId) ?: return
+        // (Re-)point the reconnect watcher at this server's sync client.
+        syncClient?.connected?.removeObserver(connectedObserver)
+        lastConnected = null
+        syncClient = SyncClientManager.get(server).also {
+            it.connected.observeForever(connectedObserver)
+        }
     }
 
     private fun loadSchema() {
@@ -72,9 +103,13 @@ class ConfigBrowserViewModel(application: Application) : AndroidViewModel(applic
             try {
                 apiClient.getSchema(server).onSuccess { loadedSchema ->
                     schema = loadedSchema
+                    // Prime the sync client with schema defaults before any list/
+                    // editor viewmodel subscribes, so bind messages seed defaults.
+                    SyncClientManager.get(server).setSchemas(loadedSchema)
                     // Expand all groups by default
                     expandedGroups.addAll(buildGroupKeys())
                     rebuildItems()
+                    initialLoadDone = true
                 }.onFailure { e ->
                     _error.value = e.message ?: "Failed to load schema"
                 }
@@ -86,7 +121,23 @@ class ConfigBrowserViewModel(application: Application) : AndroidViewModel(applic
         }
     }
 
+    override fun onCleared() {
+        super.onCleared()
+        syncClient?.connected?.removeObserver(connectedObserver)
+    }
+
     fun getSchema(collectionName: String): CollectionSchema? = schema[collectionName]
+
+    /**
+     * Get non-abstract member types for a given collectionId.
+     * Used by the "Add" UI to show a type picker when a collection has multiple
+     * instantiable member types.
+     */
+    fun getMemberTypes(collectionId: Int): List<Pair<String, CollectionSchema>> {
+        return schema.entries
+            .filter { (_, s) -> s.collectionId == collectionId && !s.abstract }
+            .map { it.key to it.value }
+    }
 
     fun toggleGroup(groupName: String) {
         if (expandedGroups.contains(groupName)) {
@@ -112,7 +163,10 @@ class ConfigBrowserViewModel(application: Application) : AndroidViewModel(applic
     }
 
     /**
-     * Recursively flatten the tree into the adapter list.
+     * Recursively flatten the tree into the adapter list. Groups and leaves
+     * at the same level are interleaved and sorted together by display label
+     * — otherwise top-level collections get stranded at the bottom behind all
+     * the folders regardless of their name.
      */
     private fun flattenTree(
         node: TreeNode,
@@ -120,47 +174,49 @@ class ConfigBrowserViewModel(application: Application) : AndroidViewModel(applic
         depth: Int,
         parentKey: String,
     ) {
-        val childKeys = node.children.keys.sorted()
-        val collections = node.collections.sortedBy { it.label }
+        // Gather renderable entries at this level with a sort key so we can
+        // interleave folders and leaves in one alphabetical pass.
+        val entries = mutableListOf<Pair<String, () -> Unit>>()
 
-        // Render child groups first (folders before files)
-        for (childName in childKeys) {
-            val child = node.children[childName] ?: continue
+        for ((childName, child) in node.children) {
             val totalCount = countDescendants(child)
             if (totalCount == 0) continue
-
             val key = if (parentKey.isEmpty()) childName else "$parentKey/$childName"
+            val display = formatName(childName)
             val isExpanded = expandedGroups.contains(key)
-
-            items.add(
-                BrowserItem.Group(
-                    key = key,
-                    name = childName,
-                    displayName = formatName(childName),
-                    icon = getGroupIcon(childName),
-                    expanded = isExpanded,
-                    childCount = totalCount,
-                    depth = depth,
+            entries += display to {
+                items.add(
+                    BrowserItem.Group(
+                        key = key,
+                        name = childName,
+                        displayName = display,
+                        icon = getGroupIcon(childName),
+                        expanded = isExpanded,
+                        childCount = totalCount,
+                        depth = depth,
+                    )
                 )
-            )
-
-            if (isExpanded) {
-                flattenTree(child, items, depth + 1, key)
+                if (isExpanded) flattenTree(child, items, depth + 1, key)
             }
         }
 
-        // Then render leaf collections
-        for (col in collections) {
-            items.add(
-                BrowserItem.Leaf(
-                    collectionName = col.name,
-                    displayName = formatName(col.label),
-                    icon = getCollectionIcon(col.name),
-                    path = col.schema.path,
-                    depth = depth,
+        for (col in node.collections) {
+            val display = formatName(col.label)
+            entries += display to {
+                items.add(
+                    BrowserItem.Leaf(
+                        collectionName = col.name,
+                        displayName = display,
+                        icon = getCollectionIcon(col.name),
+                        path = col.schema.path,
+                        depth = depth,
+                    )
                 )
-            )
+            }
         }
+
+        entries.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.first })
+            .forEach { (_, render) -> render() }
     }
 
     /** Count total leaf collections reachable from a node. */
@@ -188,6 +244,10 @@ class ConfigBrowserViewModel(application: Application) : AndroidViewModel(applic
         val root = TreeNode()
 
         for ((name, collectionSchema) in schema) {
+            // Only collection roots appear in navigation. Member types are grouped
+            // under their parent collection via shared collectionId.
+            if (!collectionSchema.collection) continue
+
             val parts = collectionSchema.path.split("/").filter { it.isNotEmpty() }
             if (parts.isEmpty()) continue
 
@@ -220,7 +280,8 @@ class ConfigBrowserViewModel(application: Application) : AndroidViewModel(applic
 
     private fun formatName(name: String): String {
         return name
-            .replace("_", " ")
+            .replace('_', ' ')
+            .replace('-', ' ')
             .replace(Regex("([a-z])([A-Z])"), "$1 $2")
             .split(" ")
             .joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
