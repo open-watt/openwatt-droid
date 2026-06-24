@@ -63,7 +63,7 @@
 
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- Section 2: Energy Overview (placeholder) -->
+        <!-- Section 2: Today's Scorecard (filled programmatically) -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -74,95 +74,15 @@
             app:strokeColor="@color/state_idle">
 
             <LinearLayout
+                android:id="@+id/scorecardContainer"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:padding="16dp"
-                android:alpha="0.5">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Energy Overview"
-                    android:textAppearance="?attr/textAppearanceSubtitle1"
-                    android:textStyle="bold" />
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:orientation="horizontal">
-
-                    <LinearLayout
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:orientation="vertical"
-                        android:gravity="center">
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="\u2600\uFE0F Solar"
-                            android:textSize="12sp"
-                            android:textColor="?android:attr/textColorSecondary" />
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="-- kW"
-                            android:textSize="16sp"
-                            android:textStyle="bold"
-                            android:textColor="?android:attr/textColorSecondary" />
-                    </LinearLayout>
-
-                    <LinearLayout
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:orientation="vertical"
-                        android:gravity="center">
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="\uD83C\uDFE0 Grid"
-                            android:textSize="12sp"
-                            android:textColor="?android:attr/textColorSecondary" />
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="-- kW"
-                            android:textSize="16sp"
-                            android:textStyle="bold"
-                            android:textColor="?android:attr/textColorSecondary" />
-                    </LinearLayout>
-
-                    <LinearLayout
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:orientation="vertical"
-                        android:gravity="center">
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="\uD83D\uDD0B Battery"
-                            android:textSize="12sp"
-                            android:textColor="?android:attr/textColorSecondary" />
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="--%"
-                            android:textSize="16sp"
-                            android:textStyle="bold"
-                            android:textColor="?android:attr/textColorSecondary" />
-                    </LinearLayout>
-
-                </LinearLayout>
-
-            </LinearLayout>
+                android:padding="16dp" />
 
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- Section 3: Smart Decisions (placeholder) -->
+        <!-- Section 3: Energy Manager (filled programmatically) -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -173,28 +93,11 @@
             app:strokeColor="@color/state_idle">
 
             <LinearLayout
+                android:id="@+id/managerContainer"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:padding="16dp"
-                android:alpha="0.5">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Smart Decisions"
-                    android:textAppearance="?attr/textAppearanceSubtitle1"
-                    android:textStyle="bold" />
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:text="Automation status and energy management overrides\n(EV charging schedules, battery control, load management)"
-                    android:textAppearance="?attr/textAppearanceCaption"
-                    android:textColor="?android:attr/textColorSecondary" />
-
-            </LinearLayout>
+                android:padding="16dp" />
 
         </com.google.android.material.card.MaterialCardView>
 

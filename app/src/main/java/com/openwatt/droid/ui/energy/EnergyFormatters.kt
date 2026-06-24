@@ -1,9 +1,7 @@
 package com.openwatt.droid.ui.energy
 
 import com.openwatt.droid.model.Archetypes
-import com.openwatt.droid.model.energy.MeterData
 import com.openwatt.droid.model.energy.MeterType
-import com.openwatt.droid.model.energy.PhaseValue
 import com.openwatt.droid.model.energy.PowerState
 import com.openwatt.droid.util.UnitConverter
 import kotlin.math.abs
@@ -141,32 +139,5 @@ object EnergyFormatters {
             power < -POWER_DEAD_BAND -> "producing"
             else -> "idle"
         }
-    }
-
-    /** Aggregate meter data from multiple sources (e.g. multiple MPPTs). */
-    fun aggregateMeterData(meters: List<MeterData?>): MeterData {
-        var totalPower = 0.0
-        var voltageSum = 0.0
-        var voltageCount = 0
-        var totalCurrent = 0.0
-        var totalImport = 0.0
-        var totalExport = 0.0
-
-        for (m in meters) {
-            if (m == null) continue
-            m.power?.scalar?.let { totalPower += it }
-            m.voltage?.scalar?.let { voltageSum += it; voltageCount++ }
-            m.current?.scalar?.let { totalCurrent += it }
-            m.import?.scalar?.let { totalImport += it }
-            m.export?.scalar?.let { totalExport += it }
-        }
-
-        return MeterData(
-            power = PhaseValue.Scalar(totalPower),
-            voltage = if (voltageCount > 0) PhaseValue.Scalar(voltageSum / voltageCount) else null,
-            current = if (totalCurrent != 0.0) PhaseValue.Scalar(totalCurrent) else null,
-            import = if (totalImport != 0.0) PhaseValue.Scalar(totalImport) else null,
-            export = if (totalExport != 0.0) PhaseValue.Scalar(totalExport) else null,
-        )
     }
 }
