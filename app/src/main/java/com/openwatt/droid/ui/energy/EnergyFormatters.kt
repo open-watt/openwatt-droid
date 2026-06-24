@@ -21,11 +21,13 @@ object EnergyFormatters {
      * Matches the web app's getPowerState() logic.
      */
     fun getPowerState(
-        power: Double,
+        power: Double?,
         meterType: MeterType,
         circuitType: String?,
         nodeType: String,
     ): PowerState {
+        // null = unknown (a meter field that came back NaN). Don't render it as 0.
+        if (power == null) return PowerState("NO DATA", "unknown", "")
         val isPositive = power > POWER_DEAD_BAND
         val isNegative = power < -POWER_DEAD_BAND
 
@@ -76,6 +78,24 @@ object EnergyFormatters {
     fun formatEnergy(joules: Double): String {
         val wh = UnitConverter.convertValue(joules, "J", "Wh")
         return UnitConverter.formatWithPrefix(wh, "Wh").formatted
+    }
+
+    /**
+     * Format an energy value already in kWh — the unit the circuit.* element
+     * model uses. Scales kWh -> Wh then applies an SI prefix. Returns e.g.
+     * "12.3 kWh", "500 Wh".
+     */
+    fun formatEnergyKWh(kwh: Double): String {
+        return UnitConverter.formatWithPrefix(kwh * 1000, "Wh").formatted
+    }
+
+    /** Meter type for a render node: DC for battery/solar circuits, else single-phase. */
+    fun meterTypeOf(circuitType: String?): MeterType {
+        return if (circuitType == "battery" || circuitType == "solar") {
+            MeterType.DC
+        } else {
+            MeterType.SINGLE_PHASE
+        }
     }
 
     /** Format a value with a specific unit (e.g. voltage, current). */

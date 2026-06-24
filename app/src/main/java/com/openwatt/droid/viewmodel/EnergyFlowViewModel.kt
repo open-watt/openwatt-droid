@@ -5,9 +5,11 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.viewModelScope
-import com.openwatt.droid.model.energy.Appliance
-import com.openwatt.droid.model.energy.Circuit
 import com.openwatt.droid.model.energy.DetailLevel
+import com.openwatt.droid.model.energy.graph.Forest
+import com.openwatt.droid.model.energy.graph.ForestNode
+import com.openwatt.droid.model.energy.graph.EnergyModelParser
+import com.openwatt.droid.model.energy.graph.buildForest
 import com.openwatt.droid.network.OpenWattClient
 import com.openwatt.droid.repository.ServerRepository
 import kotlinx.coroutines.Job
@@ -15,6 +17,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
+/**
+ * Drives the Energy Flow tab. Polls the `energy.circuit.*`/`islands.*` element
+ * model via [OpenWattClient.getEnergyElements], parses it into an EnergyModel,
+ * and reshapes it into a render [Forest] for the tree view.
+ */
 class EnergyFlowViewModel(application: Application) : AndroidViewModel(application) {
     private val serverRepository = ServerRepository(application)
     private val apiClient = OpenWattClient()
@@ -22,17 +29,14 @@ class EnergyFlowViewModel(application: Application) : AndroidViewModel(applicati
     private var serverId: String? = null
     private var pollingJob: Job? = null
 
-    private val _circuits = MutableLiveData<Map<String, Circuit>>(emptyMap())
-    val circuits: LiveData<Map<String, Circuit>> = _circuits
+    private val _forest = MutableLiveData(Forest(emptyList(), emptyMap()))
+    val forest: LiveData<Forest> = _forest
 
-    private val _appliances = MutableLiveData<Map<String, Appliance>>(emptyMap())
-    val appliances: LiveData<Map<String, Appliance>> = _appliances
-
-    /** Selected node key: "circuit:id" or "appliance:id" */
+    /** Selected node key — a forest node.key like "bus:main" / "appliance:goodwe". */
     private val _selectedNode = MutableLiveData<String?>(null)
     val selectedNode: LiveData<String?> = _selectedNode
 
-    /** Per-node detail levels */
+    /** Per-node detail levels. */
     private val _detailLevels = MutableLiveData<Map<String, DetailLevel>>(emptyMap())
     val detailLevels: LiveData<Map<String, DetailLevel>> = _detailLevels
 
@@ -48,6 +52,8 @@ class EnergyFlowViewModel(application: Application) : AndroidViewModel(applicati
         loadData()
     }
 
+    fun getNode(nodeKey: String): ForestNode? = _forest.value?.index?.get(nodeKey)
+
     private fun loadData() {
         val sid = serverId ?: return
         val server = serverRepository.getServer(sid) ?: return
@@ -56,30 +62,16 @@ class EnergyFlowViewModel(application: Application) : AndroidViewModel(applicati
         _error.value = null
 
         viewModelScope.launch {
-            try {
-                val circuitsResult = apiClient.getCircuits(server)
-                val appliancesResult = apiClient.getAppliances(server)
-
-                circuitsResult.onSuccess { _circuits.value = it }
-                    .onFailure { e ->
-                        _error.value = e.message
-                        _isLoading.value = false
-                        return@launch
-                    }
-
-                appliancesResult.onSuccess { _appliances.value = it }
-                    .onFailure { e ->
-                        _error.value = e.message
-                        _isLoading.value = false
-                        return@launch
-                    }
-
-                _isLoading.value = false
-                startPolling()
-            } catch (e: Exception) {
-                _error.value = e.message
-                _isLoading.value = false
-            }
+            apiClient.getEnergyElements(server)
+                .onSuccess { raw ->
+                    _forest.value = buildForest(EnergyModelParser.parse(raw))
+                    _isLoading.value = false
+                    startPolling()
+                }
+                .onFailure { e ->
+                    _error.value = e.message
+                    _isLoading.value = false
+                }
         }
     }
 
@@ -91,11 +83,8 @@ class EnergyFlowViewModel(application: Application) : AndroidViewModel(applicati
         pollingJob = viewModelScope.launch {
             while (isActive) {
                 delay(2000)
-                try {
-                    apiClient.getCircuits(server).onSuccess { _circuits.value = it }
-                    apiClient.getAppliances(server).onSuccess { _appliances.value = it }
-                } catch (_: Exception) {
-                    // Silent failure during polling
+                apiClient.getEnergyElements(server).onSuccess { raw ->
+                    _forest.value = buildForest(EnergyModelParser.parse(raw))
                 }
             }
         }
@@ -110,29 +99,18 @@ class EnergyFlowViewModel(application: Application) : AndroidViewModel(applicati
         _selectedNode.value = if (_selectedNode.value == nodeKey) null else nodeKey
     }
 
-    fun getDetailLevel(nodeKey: String): DetailLevel {
-        return _detailLevels.value?.get(nodeKey) ?: DetailLevel.SIMPLE
-    }
+    fun getDetailLevel(nodeKey: String): DetailLevel =
+        _detailLevels.value?.get(nodeKey) ?: DetailLevel.SIMPLE
 
-    fun cycleDetailLevel(nodeKey: String) {
-        val current = getDetailLevel(nodeKey)
-        val next = current.next()
-        val levels = (_detailLevels.value ?: emptyMap()).toMutableMap()
-        levels[nodeKey] = next
-        _detailLevels.value = levels
-    }
+    fun cycleDetailLevel(nodeKey: String) = setDetailLevel(nodeKey, getDetailLevel(nodeKey).next())
 
-    fun decreaseDetailLevel(nodeKey: String) {
-        val current = getDetailLevel(nodeKey)
-        val prev = current.previous()
-        val levels = (_detailLevels.value ?: emptyMap()).toMutableMap()
-        levels[nodeKey] = prev
-        _detailLevels.value = levels
-    }
+    fun decreaseDetailLevel(nodeKey: String) = setDetailLevel(nodeKey, getDetailLevel(nodeKey).previous())
 
-    fun resetDetailLevel(nodeKey: String) {
+    fun resetDetailLevel(nodeKey: String) = setDetailLevel(nodeKey, DetailLevel.SIMPLE)
+
+    private fun setDetailLevel(nodeKey: String, level: DetailLevel) {
         val levels = (_detailLevels.value ?: emptyMap()).toMutableMap()
-        levels[nodeKey] = DetailLevel.SIMPLE
+        levels[nodeKey] = level
         _detailLevels.value = levels
     }
 

@@ -6,12 +6,14 @@ import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.viewModelScope
 import com.openwatt.droid.model.Archetypes
-import com.openwatt.droid.model.energy.Appliance
 import com.openwatt.droid.model.energy.ApplianceSummary
 import com.openwatt.droid.model.energy.ChartData
 import com.openwatt.droid.model.energy.ChartPeriod
-import com.openwatt.droid.model.energy.Circuit
 import com.openwatt.droid.model.energy.PeriodTotal
+import com.openwatt.droid.model.energy.graph.EnergyModel
+import com.openwatt.droid.model.energy.graph.EnergyModelParser
+import com.openwatt.droid.model.energy.graph.Forest
+import com.openwatt.droid.model.energy.graph.buildForest
 import com.openwatt.droid.network.OpenWattClient
 import com.openwatt.droid.repository.ServerRepository
 import com.openwatt.droid.ui.energy.EnergyFormatters
@@ -20,19 +22,25 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
+/**
+ * Drives the Energy Summary tab from the `circuit.*` element model. Headline
+ * grid figures come from the primary island's grid account (falling back to the
+ * root bus); the appliance ranking comes from the forest's appliance nodes.
+ * Non-realtime chart periods remain stubbed pending a backend history API.
+ */
 class EnergySummaryViewModel(application: Application) : AndroidViewModel(application) {
     private val serverRepository = ServerRepository(application)
     private val apiClient = OpenWattClient()
 
     private var serverId: String? = null
     private var pollingJob: Job? = null
+    private var lastModel: EnergyModel? = null
 
-    // Data state
-    private val _circuits = MutableLiveData<Map<String, Circuit>>(emptyMap())
-    val circuits: LiveData<Map<String, Circuit>> = _circuits
+    /** Whole-home grid headline: live power + today's import/export (kWh). */
+    data class Headline(val power: Double?, val importKwh: Double?, val exportKwh: Double?)
 
-    private val _appliances = MutableLiveData<Map<String, Appliance>>(emptyMap())
-    val appliances: LiveData<Map<String, Appliance>> = _appliances
+    private val _headline = MutableLiveData(Headline(null, null, null))
+    val headline: LiveData<Headline> = _headline
 
     private val _summaries = MutableLiveData<List<ApplianceSummary>>(emptyList())
     val summaries: LiveData<List<ApplianceSummary>> = _summaries
@@ -55,7 +63,7 @@ class EnergySummaryViewModel(application: Application) : AndroidViewModel(applic
     private val _error = MutableLiveData<String?>(null)
     val error: LiveData<String?> = _error
 
-    // Chart history buffer — always full-width (10 minutes at 2s intervals)
+    // Chart history buffer — always full-width (10 minutes at 2s intervals).
     private val maxHistoryPoints = 300
     private val pollIntervalMs = 2000L
     private val historyTimestamps = mutableListOf<Long>()
@@ -77,10 +85,7 @@ class EnergySummaryViewModel(application: Application) : AndroidViewModel(applic
             historyTimestamps.add(now - (maxHistoryPoints - 1 - i) * pollIntervalMs)
             historyPower.add(0f)
         }
-        _chartData.value = ChartData(
-            timestamps = historyTimestamps.toList(),
-            power = historyPower.toList(),
-        )
+        publishChart()
     }
 
     private fun loadData() {
@@ -91,36 +96,16 @@ class EnergySummaryViewModel(application: Application) : AndroidViewModel(applic
         _error.value = null
 
         viewModelScope.launch {
-            try {
-                val circuitsResult = apiClient.getCircuits(server)
-                val appliancesResult = apiClient.getAppliances(server)
-
-                circuitsResult.onSuccess { c ->
-                    _circuits.value = c
-                }.onFailure { e ->
+            apiClient.getEnergyElements(server)
+                .onSuccess { raw ->
+                    process(EnergyModelParser.parse(raw))
+                    _isLoading.value = false
+                    startPolling()
+                }
+                .onFailure { e ->
                     _error.value = e.message
                     _isLoading.value = false
-                    return@launch
                 }
-
-                appliancesResult.onSuccess { a ->
-                    _appliances.value = a
-                }.onFailure { e ->
-                    _error.value = e.message
-                    _isLoading.value = false
-                    return@launch
-                }
-
-                collectHistoryPoint()
-                buildSummaries()
-                updatePeriodTotals()
-                _isLoading.value = false
-
-                startPolling()
-            } catch (e: Exception) {
-                _error.value = e.message
-                _isLoading.value = false
-            }
         }
     }
 
@@ -131,32 +116,114 @@ class EnergySummaryViewModel(application: Application) : AndroidViewModel(applic
 
         pollingJob = viewModelScope.launch {
             while (isActive) {
-                delay(2000)
-                try {
-                    val circuitsResult = apiClient.getCircuits(server)
-                    val appliancesResult = apiClient.getAppliances(server)
-
-                    circuitsResult.onSuccess { _circuits.value = it }
-                    appliancesResult.onSuccess { _appliances.value = it }
-
-                    collectHistoryPoint()
-                    buildSummaries()
-                    updatePeriodTotals()
-                } catch (_: Exception) {
-                    // Silent failure during polling — don't overwrite existing data
+                delay(pollIntervalMs)
+                apiClient.getEnergyElements(server).onSuccess { raw ->
+                    process(EnergyModelParser.parse(raw))
                 }
             }
         }
     }
 
-    fun stopPolling() {
-        pollingJob?.cancel()
-        pollingJob = null
+    private fun process(model: EnergyModel) {
+        lastModel = model
+        val forest = buildForest(model)
+        val head = gridHeadline(model, forest)
+        _headline.value = head
+        collectHistoryPoint(head.power)
+        _summaries.value = buildSummaries(forest)
+        updatePeriodTotals(model, head)
+    }
+
+    /**
+     * Headline grid figures: prefer the primary (grid) island account; fall back
+     * to the first root bus's meter when no island is published.
+     */
+    private fun gridHeadline(model: EnergyModel, forest: Forest): Headline {
+        val island = model.primaryIsland()
+        if (island != null) {
+            return Headline(
+                power = numOf(island["account.grid.power"]),
+                importKwh = numOf(island["account.grid.today.import"]),
+                exportKwh = numOf(island["account.grid.today.export"]),
+            )
+        }
+        val rootBus = forest.roots.firstOrNull { it.kind == "bus" }
+        return Headline(rootBus?.power, rootBus?.meter?.import, rootBus?.meter?.export)
+    }
+
+    private fun buildSummaries(forest: Forest): List<ApplianceSummary> {
+        return forest.index.values
+            .filter { it.kind == "appliance" }
+            .map { node ->
+                val m = node.anchorPort?.meter
+                val power = node.power
+                ApplianceSummary(
+                    id = node.id,
+                    name = node.name,
+                    type = node.applianceType ?: "",
+                    icon = Archetypes.resolve(node.applianceType ?: "").icon,
+                    currentPower = power ?: 0.0,
+                    dailyImport = m?.import ?: 0.0,
+                    dailyExport = m?.export ?: 0.0,
+                    isProducing = power != null && power < -10,
+                )
+            }
+            .sortedByDescending { it.dailyImport - it.dailyExport }
+    }
+
+    private fun collectHistoryPoint(power: Double?) {
+        historyTimestamps.add(System.currentTimeMillis())
+        historyPower.add((power ?: 0.0).toFloat())
+        if (historyTimestamps.size > maxHistoryPoints) {
+            historyTimestamps.removeAt(0)
+            historyPower.removeAt(0)
+        }
+        publishChart()
+    }
+
+    private fun publishChart() {
+        _chartData.value = ChartData(
+            timestamps = historyTimestamps.toList(),
+            power = historyPower.toList(),
+        )
+    }
+
+    private fun updatePeriodTotals(model: EnergyModel, head: Headline) {
+        val period = _selectedPeriod.value ?: ChartPeriod.REALTIME
+        val isRealtime = period == ChartPeriod.REALTIME
+        val historyStub = "Requires backend:\nGET /api/energy/history"
+
+        val generated = numOf(model.primaryIsland()?.get("account.solar.today.energy"))
+        val imported = head.importKwh
+        val exported = head.exportKwh
+        val consumed = (imported ?: 0.0) + (generated ?: 0.0) - (exported ?: 0.0)
+
+        fun cell(label: String, kwh: Double?): PeriodTotal {
+            val show = isRealtime && kwh != null
+            return PeriodTotal(
+                label = label,
+                value = if (show) EnergyFormatters.formatEnergyKWh(kwh!!) else "--",
+                costText = if (!isRealtime) historyStub else null,
+                isStub = !show,
+            )
+        }
+
+        _periodTotals.value = listOf(
+            cell("Imported", imported),
+            cell("Exported", exported),
+            cell("Generated", generated),
+            PeriodTotal(
+                label = "Consumed",
+                value = if (isRealtime) EnergyFormatters.formatEnergyKWh(consumed) else "--",
+                costText = if (!isRealtime) historyStub else null,
+                isStub = !isRealtime,
+            ),
+        )
     }
 
     fun selectPeriod(period: ChartPeriod) {
         _selectedPeriod.value = period
-        updatePeriodTotals()
+        lastModel?.let { updatePeriodTotals(it, _headline.value ?: Headline(null, null, null)) }
     }
 
     fun selectAppliance(applianceId: String?) {
@@ -165,109 +232,17 @@ class EnergySummaryViewModel(application: Application) : AndroidViewModel(applic
 
     fun retry() {
         serverId?.let {
-            this.serverId = null // Force re-init
+            this.serverId = null
             initialize(it)
         }
     }
 
-    private fun collectHistoryPoint() {
-        val circuits = _circuits.value ?: return
-        val mainCircuit = circuits.values.firstOrNull() ?: return
-        val power = mainCircuit.meterData?.powerWatts ?: 0.0
-
-        // Append new point, drop oldest to keep fixed width
-        historyTimestamps.add(System.currentTimeMillis())
-        historyPower.add(power.toFloat())
-        if (historyTimestamps.size > maxHistoryPoints) {
-            historyTimestamps.removeAt(0)
-            historyPower.removeAt(0)
-        }
-
-        _chartData.value = ChartData(
-            timestamps = historyTimestamps.toList(),
-            power = historyPower.toList(),
-        )
+    fun stopPolling() {
+        pollingJob?.cancel()
+        pollingJob = null
     }
 
-    private fun buildSummaries() {
-        val appliances = _appliances.value ?: return
-
-        val list = appliances.entries
-            .filter { it.value.type != "car" } // Cars are sub-items of EVSEs
-            .map { (id, app) ->
-                val power = app.meterData?.powerWatts ?: 0.0
-                val dailyImport = app.meterData?.import?.scalar ?: 0.0
-                val dailyExport = app.meterData?.export?.scalar ?: 0.0
-
-                ApplianceSummary(
-                    id = id,
-                    name = app.name ?: id,
-                    type = app.type,
-                    icon = Archetypes.resolve(app.type).icon,
-                    currentPower = power,
-                    dailyImport = dailyImport,
-                    dailyExport = dailyExport,
-                    isProducing = power < -10,
-                )
-            }
-            .sortedByDescending { it.dailyImport - it.dailyExport } // Rank by net consumption
-
-        _summaries.value = list
-    }
-
-    private fun updatePeriodTotals() {
-        val period = _selectedPeriod.value ?: ChartPeriod.REALTIME
-        val circuits = _circuits.value ?: emptyMap()
-        val mainCircuit = circuits.values.firstOrNull()
-        val mainMeter = mainCircuit?.meterData
-
-        val isRealtime = period == ChartPeriod.REALTIME
-        val periodLabel = if (isRealtime) "Session" else period.label
-
-        // For non-realtime periods, we'd need the history API
-        val stubMessage = if (!isRealtime) "Requires backend:\nGET /api/energy/history" else null
-        val costStub = "Requires backend:\nGET /api/energy/tariff"
-
-        val totalImport = mainMeter?.import?.scalar ?: 0.0
-        val totalExport = mainMeter?.export?.scalar ?: 0.0
-
-        // Estimate consumed and generated from appliances
-        val appliances = _appliances.value ?: emptyMap()
-        val totalGenerated = appliances.values
-            .filter { (it.meterData?.powerWatts ?: 0.0) < -10 || it.type == "inverter" }
-            .sumOf { it.meterData?.export?.scalar ?: 0.0 }
-
-        val totals = listOf(
-            PeriodTotal(
-                label = "Imported",
-                value = if (isRealtime && totalImport > 0) EnergyFormatters.formatEnergy(totalImport) else "--",
-                costText = costStub,
-                isStub = !isRealtime || totalImport == 0.0,
-            ),
-            PeriodTotal(
-                label = "Exported",
-                value = if (isRealtime && totalExport > 0) EnergyFormatters.formatEnergy(totalExport) else "--",
-                costText = costStub,
-                isStub = !isRealtime || totalExport == 0.0,
-            ),
-            PeriodTotal(
-                label = "Generated",
-                value = if (isRealtime && totalGenerated > 0) EnergyFormatters.formatEnergy(totalGenerated) else "--",
-                costText = if (!isRealtime) stubMessage else null,
-                isStub = !isRealtime || totalGenerated == 0.0,
-            ),
-            PeriodTotal(
-                label = "Consumed",
-                value = if (isRealtime && totalImport > 0) {
-                    EnergyFormatters.formatEnergy(totalImport + totalGenerated - totalExport)
-                } else "--",
-                costText = if (!isRealtime) stubMessage else costStub,
-                isStub = !isRealtime,
-            ),
-        )
-
-        _periodTotals.value = totals
-    }
+    private fun numOf(v: Any?): Double? = (v as? Number)?.toDouble()
 
     override fun onCleared() {
         super.onCleared()

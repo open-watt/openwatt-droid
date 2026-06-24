@@ -138,17 +138,18 @@ class EnergySummaryFragment : Fragment() {
             binding.energyErrorMessage.text = error
         }
 
-        // Update current power indicator
-        viewModel.circuits.observe(viewLifecycleOwner) { circuits ->
+        // Update current power indicator from the grid headline
+        viewModel.headline.observe(viewLifecycleOwner) { head ->
             if (_binding == null) return@observe
-            val mainCircuit = circuits.values.firstOrNull()
-            val power = mainCircuit?.meterData?.powerWatts ?: 0.0
-            val meterType = mainCircuit?.meterData?.inferMeterType()
-                ?: com.openwatt.droid.model.energy.MeterType.SINGLE_PHASE
-
-            val state = EnergyFormatters.getPowerState(power, meterType, mainCircuit?.type, "circuit")
+            val state = EnergyFormatters.getPowerState(
+                head.power,
+                com.openwatt.droid.model.energy.MeterType.SINGLE_PHASE,
+                null,
+                "circuit",
+            )
             binding.currentPowerLabel.text = state.label
-            binding.currentPowerValue.text = "${state.arrow} ${EnergyFormatters.formatPower(abs(power))}"
+            binding.currentPowerValue.text =
+                if (head.power == null) "--" else "${state.arrow} ${EnergyFormatters.formatPower(abs(head.power!!))}"
 
             val colorRes = when (state.stateClass) {
                 "consuming" -> R.color.state_error

@@ -66,7 +66,7 @@ class ApplianceListAdapter(
             // Daily energy
             val dailyEnergy = if (item.isProducing) item.dailyExport else item.dailyImport
             binding.applianceEnergy.text = if (dailyEnergy > 0) {
-                EnergyFormatters.formatEnergy(dailyEnergy)
+                EnergyFormatters.formatEnergyKWh(dailyEnergy)
             } else {
                 "--"
             }

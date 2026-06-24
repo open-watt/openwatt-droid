@@ -8,7 +8,6 @@ import androidx.fragment.app.Fragment
 import androidx.lifecycle.ViewModelProvider
 import com.google.android.material.bottomsheet.BottomSheetBehavior
 import com.openwatt.droid.databinding.FragmentEnergyFlowBinding
-import com.openwatt.droid.model.energy.Circuit
 import com.openwatt.droid.ui.energy.CircuitTreeBuilder
 import com.openwatt.droid.ui.energy.MeterDetailView
 import com.openwatt.droid.viewmodel.EnergyFlowViewModel
@@ -49,18 +48,11 @@ class EnergyFlowFragment : Fragment() {
 
         detailView = MeterDetailView(
             context = requireContext(),
-            onDetailMore = {
-                viewModel.selectedNode.value?.let { viewModel.cycleDetailLevel(it) }
-            },
-            onDetailLess = {
-                viewModel.selectedNode.value?.let { viewModel.decreaseDetailLevel(it) }
-            },
-            onDetailBack = {
-                viewModel.selectedNode.value?.let { viewModel.resetDetailLevel(it) }
-            },
+            onDetailMore = { viewModel.selectedNode.value?.let { viewModel.cycleDetailLevel(it) } },
+            onDetailLess = { viewModel.selectedNode.value?.let { viewModel.decreaseDetailLevel(it) } },
+            onDetailBack = { viewModel.selectedNode.value?.let { viewModel.resetDetailLevel(it) } },
         )
 
-        // Set up bottom sheet — starts hidden, slides up when a node is selected
         bottomSheet = BottomSheetBehavior.from(binding.detailPanel)
         bottomSheet.state = BottomSheetBehavior.STATE_HIDDEN
         bottomSheet.isFitToContents = true
@@ -82,8 +74,7 @@ class EnergyFlowFragment : Fragment() {
     }
 
     private fun observeViewModel() {
-        viewModel.circuits.observe(viewLifecycleOwner) { rebuildTree() }
-        viewModel.appliances.observe(viewLifecycleOwner) { rebuildTree() }
+        viewModel.forest.observe(viewLifecycleOwner) { rebuildTree() }
 
         viewModel.selectedNode.observe(viewLifecycleOwner) { nodeKey ->
             if (_binding == null) return@observe
@@ -102,8 +93,7 @@ class EnergyFlowFragment : Fragment() {
 
         viewModel.detailLevels.observe(viewLifecycleOwner) {
             if (_binding == null) return@observe
-            val nodeKey = viewModel.selectedNode.value
-            if (nodeKey != null) updateDetailPanel(nodeKey)
+            viewModel.selectedNode.value?.let { updateDetailPanel(it) }
         }
 
         viewModel.isLoading.observe(viewLifecycleOwner) { loading ->
@@ -120,50 +110,24 @@ class EnergyFlowFragment : Fragment() {
 
     private fun rebuildTree() {
         if (_binding == null) return
-        val circuits = viewModel.circuits.value ?: emptyMap()
-        val appliances = viewModel.appliances.value ?: emptyMap()
+        val forest = viewModel.forest.value ?: return
 
-        val hasData = circuits.isNotEmpty()
+        val hasData = forest.roots.isNotEmpty()
         binding.treeScrollView.visibility = if (hasData) View.VISIBLE else View.GONE
         binding.flowEmpty.visibility =
-            if (!hasData && viewModel.isLoading.value != true && viewModel.error.value == null)
-                View.VISIBLE else View.GONE
+            if (!hasData && viewModel.isLoading.value != true && viewModel.error.value == null) {
+                View.VISIBLE
+            } else {
+                View.GONE
+            }
 
-        treeBuilder.buildTree(binding.treeContainer, circuits, appliances)
+        treeBuilder.buildTree(binding.treeContainer, forest)
     }
 
     private fun updateDetailPanel(nodeKey: String) {
         if (_binding == null) return
-
-        val circuits = viewModel.circuits.value ?: emptyMap()
-        val appliances = viewModel.appliances.value ?: emptyMap()
-        val detailLevel = viewModel.getDetailLevel(nodeKey)
-
-        val parts = nodeKey.split(":", limit = 2)
-        if (parts.size != 2) return
-
-        when (parts[0]) {
-            "circuit" -> {
-                val circuit = findCircuit(parts[1], circuits)
-                if (circuit != null) {
-                    detailView.buildCircuitDetail(binding.detailContent, circuit, detailLevel)
-                }
-            }
-            "appliance" -> {
-                val appliance = appliances[parts[1]]
-                if (appliance != null) {
-                    detailView.buildApplianceDetail(binding.detailContent, appliance, appliances, detailLevel)
-                }
-            }
-        }
-    }
-
-    private fun findCircuit(id: String, circuits: Map<String, Circuit>): Circuit? {
-        circuits[id]?.let { return it }
-        for (circuit in circuits.values) {
-            findCircuit(id, circuit.subCircuits)?.let { return it }
-        }
-        return null
+        val node = viewModel.getNode(nodeKey) ?: return
+        detailView.buildDetail(binding.detailContent, node, viewModel.getDetailLevel(nodeKey))
     }
 
     override fun onResume() {
