@@ -275,9 +275,11 @@ class SyncClient(private val server: Server) {
     /**
      * CIDs are uint32, but a high collection_id sets bit 31 and makes the Kotlin
      * Int negative. Serialize the unsigned value so the backend receives the
-     * correct CID (gson would otherwise emit a negative number / pattern).
+     * correct CID. Returned as a Long (not UInt) because gson can't serialize
+     * Kotlin's UInt value class — it would reflect into it and emit the wrong
+     * (signed) number.
      */
-    private fun cidWire(cid: Int): Long = cid.toLong() and 0xFFFFFFFFL
+    private fun cidWire(cid: Int): Long = cid.toUInt().toLong()
 
     private fun openSocket() {
         val url = buildWsUrl()

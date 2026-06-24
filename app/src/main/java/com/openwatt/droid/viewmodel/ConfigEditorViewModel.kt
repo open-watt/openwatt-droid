@@ -107,7 +107,7 @@ class ConfigEditorViewModel(application: Application) : AndroidViewModel(applica
         // negative. Format it unsigned so the pattern isn't "#-2013265919", which
         // the backend's unsigned `#<decimal>` matcher rejects — that silently
         // killed live updates for high-collection-id objects like streams.
-        val pattern = "#${cid.toLong() and 0xFFFFFFFFL}"
+        val pattern = "#${cid.toUInt()}"
         itemPattern = pattern
         client.subscribe(pattern)
         client.store.items.observeForever(storeObserver)
