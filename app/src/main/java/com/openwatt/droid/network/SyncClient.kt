@@ -145,7 +145,7 @@ class SyncClient(private val server: Server) {
         val socket = ws ?: return
         sendJson(socket, mapOf(
             "kind" to "set",
-            "target" to cid,
+            "target" to cidWire(cid),
             "prop" to property,
             "value" to value,
         ))
@@ -155,7 +155,7 @@ class SyncClient(private val server: Server) {
         val socket = ws ?: return
         sendJson(socket, mapOf(
             "kind" to "reset",
-            "target" to cid,
+            "target" to cidWire(cid),
             "prop" to property,
         ))
     }
@@ -218,7 +218,7 @@ class SyncClient(private val server: Server) {
                 onError = { text -> deferred.complete(Result.failure(IOException(text))) },
             )
         }
-        sendJson(socket, mapOf("kind" to "destroy", "seq" to seq, "target" to cid))
+        sendJson(socket, mapOf("kind" to "destroy", "seq" to seq, "target" to cidWire(cid)))
         return withTimeoutOrNull(timeoutMs) { deferred.await() } ?: run {
             synchronized(lock) { pending.remove(seq) }
             Result.failure(IOException("destroy timed out"))
@@ -271,6 +271,13 @@ class SyncClient(private val server: Server) {
     private fun sendJson(socket: WebSocket, msg: Map<String, Any?>) {
         socket.send(gson.toJson(msg))
     }
+
+    /**
+     * CIDs are uint32, but a high collection_id sets bit 31 and makes the Kotlin
+     * Int negative. Serialize the unsigned value so the backend receives the
+     * correct CID (gson would otherwise emit a negative number / pattern).
+     */
+    private fun cidWire(cid: Int): Long = cid.toLong() and 0xFFFFFFFFL
 
     private fun openSocket() {
         val url = buildWsUrl()

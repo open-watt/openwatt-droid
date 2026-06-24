@@ -138,7 +138,9 @@ private fun bindCollectionIcon(
         // drawn small and bold; the BLE rune is non-ASCII and drawn larger at
         // normal weight — matching the web's `.icon-badge` / `.icon-bt` rules.
         val isRune = letter.isNotEmpty() && letter[0].code > 0x7F
-        val diameter = defaultTextSize // px, ~= an emoji glyph
+        // Emoji glyphs render smaller than their nominal text size, so scale the
+        // circle down to sit at the same visual weight as the neighbouring icons.
+        val diameter = defaultTextSize * 0.75f // px, ~= an emoji glyph
         val boxPx = view.layoutParams?.width ?: 0
         val pad = if (boxPx > diameter) ((boxPx - diameter) / 2f).toInt() else 0
 
