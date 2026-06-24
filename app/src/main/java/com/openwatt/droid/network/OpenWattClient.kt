@@ -1,6 +1,7 @@
 package com.openwatt.droid.network
 
 import com.google.gson.GsonBuilder
+import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.reflect.TypeToken
 import com.openwatt.droid.model.CollectionSchema
@@ -238,15 +239,7 @@ class OpenWattClient {
 
                 val typeArray = propObj.getAsJsonArray("type")?.map { it.asString } ?: listOf("str")
                 val access = propObj.get("access")?.asString ?: "rw"
-                val default = propObj.get("default")?.let {
-                    when {
-                        it.isJsonNull -> null
-                        it.isJsonPrimitive && it.asJsonPrimitive.isBoolean -> it.asBoolean
-                        it.isJsonPrimitive && it.asJsonPrimitive.isNumber -> it.asNumber
-                        it.isJsonPrimitive -> it.asString
-                        else -> it.toString()
-                    }
-                }
+                val default = parseJsonDefault(propObj.get("default"))
                 val category = propObj.get("category")?.takeIf { !it.isJsonNull }?.asString
                 val flags = propObj.get("flags")?.takeIf { !it.isJsonNull }?.asString
 
@@ -269,6 +262,39 @@ class OpenWattClient {
             )
         }
         return result
+    }
+
+    /**
+     * Parse a schema property's `default` JSON into a Kotlin value. Objects are
+     * parsed structurally — in particular quantity defaults `{q, u}` become a
+     * `{"q":…, "u":…}` map (matching runtime quantity values), so the UI's
+     * quantity-unwrap path handles them. Previously objects fell back to
+     * `toString()`, which leaked raw JSON like `{"q":0,"u":"ms"}` into fields.
+     */
+    private fun parseJsonDefault(element: JsonElement?): Any? {
+        if (element == null || element.isJsonNull) return null
+        return when {
+            element.isJsonPrimitive -> {
+                val prim = element.asJsonPrimitive
+                when {
+                    prim.isBoolean -> prim.asBoolean
+                    prim.isNumber -> prim.asNumber
+                    else -> prim.asString
+                }
+            }
+            element.isJsonObject -> {
+                val obj = element.asJsonObject
+                if (obj.has("q")) {
+                    val q = parseJsonDefault(obj.get("q"))
+                    val u = obj.get("u")?.takeIf { !it.isJsonNull }?.asString
+                    if (u != null) mapOf("q" to q, "u" to u) else q
+                } else {
+                    obj.entrySet().associate { (k, v) -> k to parseJsonDefault(v) }
+                }
+            }
+            element.isJsonArray -> element.asJsonArray.map { parseJsonDefault(it) }
+            else -> element.toString()
+        }
     }
 
     /**

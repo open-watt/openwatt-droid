@@ -173,7 +173,7 @@ object PropertyFieldFactory {
                 }
             }
 
-            val displayValue = value ?: default ?: ""
+            val displayValue = value ?: unwrapQuantity(default) ?: ""
             setText(displayValue.toString())
         }
 
