@@ -11,6 +11,7 @@ import com.openwatt.droid.network.OpenWattClient
 import com.openwatt.droid.network.SyncClient
 import com.openwatt.droid.network.SyncClientManager
 import com.openwatt.droid.repository.ServerRepository
+import com.openwatt.droid.util.CollectionIcons
 import kotlinx.coroutines.launch
 
 /**
@@ -287,48 +288,9 @@ class ConfigBrowserViewModel(application: Application) : AndroidViewModel(applic
             .joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
     }
 
-    private fun getGroupIcon(name: String): String {
-        val lower = name.lowercase()
-        return GROUP_ICONS[lower] ?: COLLECTION_ICONS[lower] ?: "\uD83D\uDCC1" // 📁
-    }
+    // Group folders and collection leaves share the web app's icon rule set
+    // (see [CollectionIcons]); groups fall back to a folder, leaves to a page.
+    private fun getGroupIcon(name: String): String = CollectionIcons.forGroup(name)
 
-    private fun getCollectionIcon(name: String): String {
-        val lower = name.lowercase()
-        for ((key, icon) in COLLECTION_ICONS) {
-            if (lower.contains(key)) return icon
-        }
-        return "\uD83D\uDCC4" // 📄
-    }
-
-    companion object {
-        private val GROUP_ICONS = mapOf(
-            "interface" to "\uD83D\uDD0C", // 🔌
-            "device" to "\uD83D\uDCF1",    // 📱
-            "stream" to "\uD83D\uDCA7",    // 💧
-            "route" to "\uD83D\uDD00",     // 🔀
-            "schedule" to "\u23F0",         // ⏰
-            "automation" to "\uD83E\uDD16", // 🤖
-            "energy" to "\u26A1",           // ⚡
-            "sampler" to "\uD83D\uDCCA",   // 📊
-            "logger" to "\uD83D\uDCDD",    // 📝
-            "alert" to "\uD83D\uDD14",     // 🔔
-        )
-
-        private val COLLECTION_ICONS = mapOf(
-            "modbus" to "\uD83D\uDCE1",   // 📡
-            "mqtt" to "\uD83D\uDCE8",     // 📨
-            "http" to "\uD83C\uDF10",     // 🌐
-            "zigbee" to "\uD83D\uDCF6",   // 📶
-            "can" to "\uD83D\uDE97",      // 🚗
-            "device" to "\uD83D\uDCF1",   // 📱
-            "stream" to "\uD83D\uDCA7",   // 💧
-            "route" to "\uD83D\uDD00",    // 🔀
-            "schedule" to "\u23F0",        // ⏰
-            "automation" to "\uD83E\uDD16",// 🤖
-            "energy" to "\u26A1",          // ⚡
-            "sampler" to "\uD83D\uDCCA",  // 📊
-            "logger" to "\uD83D\uDCDD",   // 📝
-            "alert" to "\uD83D\uDD14",    // 🔔
-        )
-    }
+    private fun getCollectionIcon(name: String): String = CollectionIcons.forCollection(name)
 }

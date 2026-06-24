@@ -1,17 +1,17 @@
 package com.openwatt.droid.ui.fragments
 
 import android.app.AlertDialog
-import android.graphics.Typeface
+import android.content.Context
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
-import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
 import androidx.recyclerview.widget.RecyclerView
@@ -24,9 +24,10 @@ import com.openwatt.droid.model.CollectionSchema
 import com.openwatt.droid.model.EDITOR_FLAGS
 import com.openwatt.droid.model.PropertySchema
 import com.openwatt.droid.model.SyncItem
+import com.openwatt.droid.ui.config.BackpressureChartView
 import com.openwatt.droid.ui.config.FieldState
 import com.openwatt.droid.ui.config.PropertyFieldFactory
-import com.openwatt.droid.ui.config.SparklineView
+import com.openwatt.droid.ui.config.RateChartView
 import com.openwatt.droid.viewmodel.ConfigEditorViewModel
 
 class ConfigEditorFragment : Fragment() {
@@ -56,8 +57,10 @@ class ConfigEditorFragment : Fragment() {
     /** Comment value (saved immediately, not part of dirty tracking) */
     private var commentValue: String = ""
 
-    /** Traffic charts in the current category page, keyed by field. */
-    private val chartViews = mutableMapOf<String, SparklineView>()
+    /** Traffic charts in the Traffic category page (null until built). */
+    private var bandwidthRx: RateChartView? = null
+    private var bandwidthTx: RateChartView? = null
+    private var backpressureChart: BackpressureChartView? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -141,33 +144,14 @@ class ConfigEditorFragment : Fragment() {
             binding.categoryTabs.visibility = View.GONE
             binding.categoryPager.visibility = View.GONE
 
-            val scrollView = ScrollView(requireContext()).apply {
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f,
-                )
-            }
-            val container = LinearLayout(requireContext()).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(16), dp(16), dp(16), dp(16))
-            }
-
-            val entries = sorted.values.firstOrNull() ?: emptyList()
-            val fields = mutableListOf<View>()
-            for ((key, prop) in entries) {
-                val value = getItemValue(key)
-                val fv = createFieldWithLoaders(key, prop, value)
-                container.addView(fv)
-                fields.add(fv)
-            }
-            fieldViews["General"] = fields.toMutableList()
-            addTrafficCharts(container, entries)
-
-            scrollView.addView(container)
+            val holder = createCategoryPage(requireContext())
+            holder.root.layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f)
+            bindCategoryPage(holder, "General", sorted.values.firstOrNull() ?: emptyList())
 
             val parent = binding.categoryPager.parent as? ViewGroup ?: return
             val pagerIndex = parent.indexOfChild(binding.categoryPager)
             parent.removeView(binding.categoryPager)
-            parent.addView(scrollView, pagerIndex, scrollView.layoutParams)
+            parent.addView(holder.root, pagerIndex, holder.root.layoutParams)
         } else {
             binding.categoryTabs.visibility = View.VISIBLE
             binding.categoryPager.visibility = View.VISIBLE
@@ -177,34 +161,13 @@ class ConfigEditorFragment : Fragment() {
 
             binding.categoryPager.adapter = object : RecyclerView.Adapter<CategoryViewHolder>() {
                 override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): CategoryViewHolder {
-                    val scrollView = ScrollView(parent.context).apply {
-                        layoutParams = ViewGroup.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                        )
+                    return createCategoryPage(parent.context).also {
+                        it.root.layoutParams = ViewGroup.LayoutParams(MATCH_PARENT, MATCH_PARENT)
                     }
-                    val container = LinearLayout(parent.context).apply {
-                        orientation = LinearLayout.VERTICAL
-                        setPadding(dp(16), dp(16), dp(16), dp(16))
-                    }
-                    scrollView.addView(container)
-                    return CategoryViewHolder(scrollView, container)
                 }
 
                 override fun onBindViewHolder(holder: CategoryViewHolder, position: Int) {
-                    holder.container.removeAllViews()
-                    val entries = categoryEntries[position]
-                    val catName = categoryNames[position]
-                    val fields = mutableListOf<View>()
-
-                    for ((key, prop) in entries) {
-                        val value = getItemValue(key)
-                        val fv = createFieldWithLoaders(key, prop, value)
-                        holder.container.addView(fv)
-                        fields.add(fv)
-                    }
-                    fieldViews[catName] = fields.toMutableList()
-                    addTrafficCharts(holder.container, entries)
+                    bindCategoryPage(holder, categoryNames[position], categoryEntries[position])
                 }
 
                 override fun getItemCount() = categoryNames.size
@@ -216,6 +179,45 @@ class ConfigEditorFragment : Fragment() {
         }
 
         reloadPendingData()
+    }
+
+    /** Build an empty category page: a scrollable field area over a fixed chart panel. */
+    private fun createCategoryPage(context: Context): CategoryViewHolder {
+        val root = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        val scroll = ScrollView(context).apply {
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f)
+        }
+        val fieldContainer = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+        }
+        scroll.addView(fieldContainer)
+        val chartPanel = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(4), dp(12), dp(12))
+            visibility = View.GONE
+        }
+        root.addView(scroll)
+        root.addView(chartPanel)
+        return CategoryViewHolder(root, fieldContainer, chartPanel)
+    }
+
+    /** Populate a category page's fields and (for the Traffic category) its charts. */
+    private fun bindCategoryPage(
+        holder: CategoryViewHolder,
+        catName: String,
+        entries: List<Pair<String, PropertySchema>>,
+    ) {
+        holder.fieldContainer.removeAllViews()
+        val fields = mutableListOf<View>()
+        for ((key, prop) in entries) {
+            val value = getItemValue(key)
+            val fv = createFieldWithLoaders(key, prop, value)
+            holder.fieldContainer.addView(fv)
+            fields.add(fv)
+        }
+        fieldViews[catName] = fields.toMutableList()
+        buildTrafficPanel(holder.chartPanel, entries)
     }
 
     private fun buildBottomBar(schema: CollectionSchema) {
@@ -315,57 +317,75 @@ class ConfigEditorFragment : Fragment() {
     }
 
     /**
-     * Append larger traffic graphs to a category page for any chartable rate/
-     * timing fields it contains (rx-rate, tx-rate, queue/service time, …). The
-     * charts scroll with the page's fields and update from the editor VM's
-     * rate-history ring buffers.
+     * Build the fixed Traffic panel for a category holding traffic metrics: a
+     * top row of side-by-side RX/TX bandwidth charts, and below a combined
+     * back-pressure chart (queue + service time stacked, max as a red line).
+     * Mirrors the web bandwidth/backpressure charts; hidden for other categories.
      */
-    private fun addTrafficCharts(container: LinearLayout, entries: List<Pair<String, PropertySchema>>) {
-        val chartKeys = entries.map { it.first }.filter { it in viewModel.getChartKeys() }
-        if (chartKeys.isEmpty()) return
-
-        container.addView(TextView(requireContext()).apply {
-            text = "Traffic"
-            textSize = 13f
-            setTypeface(null, Typeface.BOLD)
-            setPadding(0, dp(12), 0, dp(4))
-        })
-
-        for (key in chartKeys) {
-            container.addView(TextView(requireContext()).apply {
-                text = PropertyFieldFactory.formatLabel(key)
-                textSize = 11f
-                setPadding(0, dp(6), 0, dp(2))
-            })
-            val chart = SparklineView(requireContext()).apply {
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(110),
-                )
-                setColor(chartColor(key))
-            }
-            chartViews[key] = chart
-            container.addView(chart)
+    private fun buildTrafficPanel(panel: LinearLayout, entries: List<Pair<String, PropertySchema>>) {
+        panel.removeAllViews()
+        val keys = entries.mapTo(HashSet()) { it.first }
+        val hasBandwidth = "rx-rate" in keys || "tx-rate" in keys
+        val hasBackpressure = "avg-queue-time" in keys && "avg-service-time" in keys
+        if (!hasBandwidth && !hasBackpressure) {
+            panel.visibility = View.GONE
+            return
         }
+        panel.visibility = View.VISIBLE
+
+        if (hasBandwidth) {
+            val row = LinearLayout(requireContext()).apply {
+                orientation = LinearLayout.HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, dp(80))
+            }
+            val rx = RateChartView(requireContext()).apply {
+                configure("RX", 0xFF2563EB.toInt())
+                layoutParams = LinearLayout.LayoutParams(0, MATCH_PARENT, 1f)
+                    .apply { marginEnd = dp(6) }
+            }
+            val tx = RateChartView(requireContext()).apply {
+                configure("TX", 0xFF0D9488.toInt())
+                layoutParams = LinearLayout.LayoutParams(0, MATCH_PARENT, 1f)
+            }
+            row.addView(rx)
+            row.addView(tx)
+            panel.addView(row)
+            bandwidthRx = rx
+            bandwidthTx = tx
+        } else {
+            bandwidthRx = null
+            bandwidthTx = null
+        }
+
+        if (hasBackpressure) {
+            val bp = BackpressureChartView(requireContext()).apply {
+                layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, dp(80))
+                    .apply { topMargin = dp(8) }
+            }
+            panel.addView(bp)
+            backpressureChart = bp
+        } else {
+            backpressureChart = null
+        }
+
         updateCharts()
     }
 
-    private fun chartColor(key: String): Int {
-        val k = key.lowercase()
-        return when {
-            k.contains("rx") -> ContextCompat.getColor(requireContext(), R.color.state_ok)
-            k.contains("tx") -> 0xFF3B82F6.toInt()
-            else -> 0xFFF59E0B.toInt()
-        }
+    private fun updateCharts() {
+        val h = viewModel.getRateHistory()
+        bandwidthRx?.setData(toBits(h["rx-rate"]))
+        bandwidthTx?.setData(toBits(h["tx-rate"]))
+        backpressureChart?.setData(
+            h["avg-queue-time"] ?: FloatArray(0),
+            h["avg-service-time"] ?: FloatArray(0),
+            h["max-service-time"] ?: FloatArray(0),
+        )
     }
 
-    private fun updateCharts() {
-        if (chartViews.isEmpty()) return
-        val history = viewModel.getRateHistory()
-        val hwm = viewModel.getHighWaterMarks()
-        for ((key, chart) in chartViews) {
-            history[key]?.let { chart.setData(it.copyOf()) }
-            hwm[key]?.let { chart.setHighWaterMark(it) }
-        }
+    /** Rate ring buffers are Bytes/s; the bandwidth charts display bits/s. */
+    private fun toBits(bytes: FloatArray?): FloatArray {
+        if (bytes == null) return FloatArray(0)
+        return FloatArray(bytes.size) { bytes[it] * 8f }
     }
 
     private fun observeViewModel() {
@@ -549,15 +569,18 @@ class ConfigEditorFragment : Fragment() {
         fieldViews.clear()
         pendingEnumFields.clear()
         pendingRefFields.clear()
-        chartViews.clear()
+        bandwidthRx = null
+        bandwidthTx = null
+        backpressureChart = null
         flagIndicators = null
         _binding = null
     }
 
     private class CategoryViewHolder(
-        val scrollView: ScrollView,
-        val container: LinearLayout,
-    ) : RecyclerView.ViewHolder(scrollView)
+        val root: LinearLayout,
+        val fieldContainer: LinearLayout,
+        val chartPanel: LinearLayout,
+    ) : RecyclerView.ViewHolder(root)
 
     companion object {
         private const val ARG_SERVER_ID = "server_id"

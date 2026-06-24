@@ -51,8 +51,6 @@ class ConfigEditorViewModel(application: Application) : AndroidViewModel(applica
 
     /** Read-only traffic/rate fields charted in the editor (auto-detected). */
     private var chartKeys: List<String> = emptyList()
-    /** Each chart key's `-max` high-water counterpart, if the schema has one. */
-    private var chartMaxKeys: Map<String, String> = emptyMap()
     /** Rate-history ring buffers for the open item: fieldKey -> samples. */
     private val rateHistory = mutableMapOf<String, FloatArray>()
     private var sampleJob: Job? = null
@@ -76,8 +74,6 @@ class ConfigEditorViewModel(application: Application) : AndroidViewModel(applica
         chartKeys = schema.properties.entries
             .filter { (key, prop) -> isChartable(key, prop) }
             .map { it.key }
-        chartMaxKeys = chartKeys.associateWith { "$it-max" }
-            .filterValues { it in schema.properties.keys }
     }
 
     private fun isChartable(key: String, prop: PropertySchema): Boolean {
@@ -159,22 +155,8 @@ class ConfigEditorViewModel(application: Application) : AndroidViewModel(applica
         else -> null
     }
 
-    /** Chartable traffic field keys for the open item (empty if none). */
-    fun getChartKeys(): List<String> = chartKeys
-
     /** Rate-history ring buffers for the open item, keyed by field. */
     fun getRateHistory(): Map<String, FloatArray> = rateHistory
-
-    /** Backend high-water marks from `-max` fields, keyed by chart field. */
-    fun getHighWaterMarks(): Map<String, Float> {
-        if (chartMaxKeys.isEmpty()) return emptyMap()
-        val item = itemCid?.let { syncClient?.store?.getItem(it) } ?: return emptyMap()
-        val result = mutableMapOf<String, Float>()
-        for ((rateKey, maxKey) in chartMaxKeys) {
-            extractNumericValue(item.properties[maxKey])?.let { result[rateKey] = it }
-        }
-        return result
-    }
 
     fun currentItem(): SyncItem? = itemCid?.let { syncClient?.store?.getItem(it) }
 
