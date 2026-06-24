@@ -106,18 +106,58 @@ class OpenWattClient {
      * Energy state is published as elements on the synthetic `energy` device;
      * the old `GET /api/energy/circuit` endpoint has been retired on the
      * backend. The flat path->value result is reshaped into the circuit graph
-     * by the energy model layer. Mirrors the web client's `getEnergyElements`.
+     * by [com.openwatt.droid.model.energy.graph.EnergyModelParser]. Mirrors the
+     * web client's `getEnergyElements`.
      */
-    suspend fun getEnergyElements(server: Server): Result<Map<String, Map<String, Any?>>> =
-        getValues(server, listOf("energy.circuit.*", "energy.islands.*"))
+    suspend fun getEnergyElements(server: Server): Result<Map<String, Any?>> =
+        getValuesRaw(server, listOf("energy.circuit.*", "energy.islands.*"))
 
     /**
      * Fetch the planner element model (policies + allocations). Fetched
      * separately from [getEnergyElements] so a planner outage can't break the
      * energy/flow views. Mirrors the web client's `getPlannerElements`.
      */
-    suspend fun getPlannerElements(server: Server): Result<Map<String, Map<String, Any?>>> =
-        getValues(server, listOf("energy.policy.*", "energy.allocation.*"))
+    suspend fun getPlannerElements(server: Server): Result<Map<String, Any?>> =
+        getValuesRaw(server, listOf("energy.policy.*", "energy.allocation.*"))
+
+    /**
+     * Like [getValues] but returns the raw flat path->entry map without forcing
+     * each entry to be an object. Energy element values include scalars, arrays
+     * ([sum,L1,L2,L3]) and quantity objects ({q,u}); a single bare value would
+     * make the stricter [getValues] parse throw, so the energy/planner helpers
+     * use this looser shape and let the model parser normalise each entry.
+     */
+    private suspend fun getValuesRaw(
+        server: Server,
+        paths: List<String>,
+    ): Result<Map<String, Any?>> = withContext(Dispatchers.IO) {
+        if (paths.isEmpty()) {
+            return@withContext Result.success(emptyMap())
+        }
+
+        try {
+            val body = gson.toJson(mapOf("paths" to paths))
+            val request = Request.Builder()
+                .url("${server.baseUrl}/api/get")
+                .post(body.toRequestBody(JSON_MEDIA_TYPE))
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    return@withContext Result.failure(IOException("HTTP ${response.code}: ${response.message}"))
+                }
+
+                val responseBody = response.body?.string()
+                    ?: return@withContext Result.failure(IOException("Empty response body"))
+
+                val type = object : TypeToken<Map<String, Any?>>() {}.type
+                val result: Map<String, Any?> = gson.fromJson(responseBody, type)
+                Result.success(result)
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
 
     /**
      * Set element values.
