@@ -220,23 +220,24 @@ class DevicesViewModel(application: Application) : AndroidViewModel(application)
 
         apiClient.listDevices(server).onSuccess { structure ->
             val previousIds = deviceManager.getAll().map { it.id }.toSet()
-            deviceManager.initFromList(structure)
+            // Any structural change matters — not just add/remove. A zigbee
+            // device is listed as soon as it joins the mesh, and grows its
+            // components when the interview finishes and a profile matches.
+            val changed = deviceManager.initFromList(structure)
             val currentIds = deviceManager.getAll().map { it.id }.toSet()
 
             val added = currentIds - previousIds
-            if (added.isNotEmpty()) {
-                // Load static identity for new devices
-                val newInfoPaths = added.flatMap { id ->
-                    val device = deviceManager.get(id)
-                    (device?.getInfoPaths() ?: emptyList()) + (device?.getSwitchTypePaths() ?: emptyList())
-                }
+            if (changed) {
+                // Load static identity for new (or restructured) devices
+                val newInfoPaths = (if (added.isNotEmpty()) added else currentIds)
+                    .flatMap { id ->
+                        val device = deviceManager.get(id)
+                        (device?.getInfoPaths() ?: emptyList()) + (device?.getSwitchTypePaths() ?: emptyList())
+                    }
                 if (newInfoPaths.isNotEmpty()) {
                     syncClient?.model?.fetch(newInfoPaths.map { "device:$it" })
                     applyMirrorValues(newInfoPaths)
                 }
-            }
-
-            if (added.isNotEmpty() || (previousIds - currentIds).isNotEmpty()) {
                 reconcileSubscriptions()
                 _devices.value = deviceManager.getAll()
             }

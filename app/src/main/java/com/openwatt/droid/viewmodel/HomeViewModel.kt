@@ -255,20 +255,21 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     val server = serverId?.let { serverRepository.getServer(it) } ?: continue
                     apiClient.listDevices(server).onSuccess { structure ->
                         val previousIds = deviceManager.getAll().map { it.id }.toSet()
-                        deviceManager.initFromList(structure)
+                        // Any structural change matters — not just add/remove.
+                        // A zigbee device is listed as soon as it joins, and
+                        // grows its Switch gangs when the interview finishes.
+                        val changed = deviceManager.initFromList(structure)
                         val currentIds = deviceManager.getAll().map { it.id }.toSet()
 
                         val added = currentIds - previousIds
-                        if (added.isNotEmpty()) {
-                            val newInfoPaths = added.flatMap { id ->
-                                val device = deviceManager.get(id)
-                                (device?.getInfoPaths() ?: emptyList()) +
-                                    (device?.getSwitchTypePaths() ?: emptyList())
-                            }
+                        if (changed) {
+                            val newInfoPaths = (if (added.isNotEmpty()) added else currentIds)
+                                .flatMap { id ->
+                                    val device = deviceManager.get(id)
+                                    (device?.getInfoPaths() ?: emptyList()) +
+                                        (device?.getSwitchTypePaths() ?: emptyList())
+                                }
                             fetchStaticInfo(newInfoPaths)
-                        }
-
-                        if (added.isNotEmpty() || (previousIds - currentIds).isNotEmpty()) {
                             reconcileSwitchSubscriptions()
                             _switches.value = buildSwitchList()
                         }

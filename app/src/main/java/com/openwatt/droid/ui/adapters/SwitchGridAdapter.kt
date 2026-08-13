@@ -51,7 +51,10 @@ class SwitchGridAdapter(
     companion object {
         private val DIFF_CALLBACK = object : DiffUtil.ItemCallback<HomeSwitch>() {
             override fun areItemsTheSame(oldItem: HomeSwitch, newItem: HomeSwitch): Boolean {
-                return oldItem.deviceId == newItem.deviceId && oldItem.switchId == newItem.switchId
+                // switchPath, not switchId: multi-outlet devices name every
+                // gang's Switch component "switch" under its own outlet Port
+                // (see the OpenBeken profile), so ids collide within a device.
+                return oldItem.deviceId == newItem.deviceId && oldItem.switchPath == newItem.switchPath
             }
 
             override fun areContentsTheSame(oldItem: HomeSwitch, newItem: HomeSwitch): Boolean {

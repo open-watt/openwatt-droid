@@ -51,6 +51,12 @@ class Device(
     var version = 0L
         private set
 
+    /** Bump [version] after the structure tree was replaced. */
+    fun markStructureChanged() {
+        version++
+        _archetype = null
+    }
+
     private var _archetype: DeviceArchetype? = null
 
     // Sampling modes exempt from staleness
@@ -300,17 +306,31 @@ data class SwitchInfo(
 class DeviceManager {
     private val devices = mutableMapOf<String, Device>()
 
-    fun initFromList(listData: Map<String, ComponentStructure>) {
+    /**
+     * Returns true when anything structural changed — a device added or
+     * removed, or an existing device's component tree replaced with a
+     * different one. The latter matters for zigbee: a device is listed as
+     * soon as it joins the mesh, but only gains its Switch/meter components
+     * once the interview completes and a profile matches.
+     */
+    fun initFromList(listData: Map<String, ComponentStructure>): Boolean {
+        var changed = false
         for ((id, structure) in listData) {
             val existing = devices[id]
             if (existing != null) {
-                existing.structure = structure
+                if (existing.structure != structure) {
+                    existing.structure = structure
+                    existing.markStructureChanged()
+                    changed = true
+                }
             } else {
                 devices[id] = Device(id, structure)
+                changed = true
             }
         }
         // Remove devices that no longer exist
-        devices.keys.retainAll(listData.keys)
+        if (devices.keys.retainAll(listData.keys)) changed = true
+        return changed
     }
 
     fun updateValues(valuesData: Map<String, Map<String, Any?>>) {
