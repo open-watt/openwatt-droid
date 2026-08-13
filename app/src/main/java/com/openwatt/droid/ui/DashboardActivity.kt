@@ -264,6 +264,10 @@ class DashboardActivity : AppCompatActivity() {
                 openConsole()
                 true
             }
+            R.id.action_logs -> {
+                openLogs()
+                true
+            }
             R.id.action_disconnect -> {
                 disconnect()
                 true
@@ -321,6 +325,13 @@ class DashboardActivity : AppCompatActivity() {
     private fun openConsole() {
         val intent = Intent(this, ConsoleActivity::class.java).apply {
             putExtra(ConsoleActivity.EXTRA_SERVER_ID, currentServerId)
+        }
+        startActivity(intent)
+    }
+
+    private fun openLogs() {
+        val intent = Intent(this, LogActivity::class.java).apply {
+            putExtra(LogActivity.EXTRA_SERVER_ID, currentServerId)
         }
         startActivity(intent)
     }

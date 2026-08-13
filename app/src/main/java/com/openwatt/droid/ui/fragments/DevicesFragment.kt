@@ -12,6 +12,7 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.openwatt.droid.databinding.FragmentDevicesBinding
+import com.openwatt.droid.ui.ElementHistorySheet
 import com.openwatt.droid.ui.adapters.DeviceListAdapter
 import com.openwatt.droid.viewmodel.DevicesViewModel
 
@@ -47,6 +48,12 @@ class DevicesFragment : Fragment() {
             },
             onEditValue = { deviceId, elementPath, elementName, currentValue, unit ->
                 showEditValueDialog(deviceId, elementPath, elementName, currentValue, unit)
+            },
+            onShowHistory = { deviceId, elementPath, elementName, unit ->
+                val sid = serverId ?: return@DeviceListAdapter
+                ElementHistorySheet
+                    .newInstance(sid, "$deviceId.$elementPath", elementName, unit)
+                    .show(parentFragmentManager, "element_history")
             },
         )
 

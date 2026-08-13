@@ -10,6 +10,10 @@
         android:title="Console"
         app:showAsAction="never" />
     <item
+        android:id="@+id/action_logs"
+        android:title="Logs"
+        app:showAsAction="never" />
+    <item
         android:id="@+id/action_disconnect"
         android:title="Disconnect"
         app:showAsAction="never" />

@@ -118,6 +118,7 @@ class SyncClient(private val server: Server) {
                     sendJson(webSocket, mapOf("kind" to "sub", "pattern" to pattern))
                 }
             }
+            logSubscription?.let { sendJson(webSocket, it) }
             model.handleOpen()
         }
 
@@ -369,6 +370,37 @@ class SyncClient(private val server: Server) {
         }
 
     /**
+     * Fetch recorded samples for an element path via `history_req`.
+     * Times are unix ms; the backend caps a request at 2000 samples.
+     * An empty result is normal for constant elements (no history is kept).
+     */
+    suspend fun history(
+        path: String,
+        from: Long,
+        to: Long = 0,
+        maxPoints: Int = 500,
+    ): Result<List<ModelMirror.Sample>> {
+        val msg = buildMap<String, Any?> {
+            put("kind", "history_req")
+            put("path", path)
+            put("from", from)
+            if (to > 0) put("to", to)
+            put("max", maxPoints.coerceIn(1, 2000))
+        }
+        return request(msg, timeoutMs = 15_000).map { json ->
+            json.get("samples")?.takeIf { it.isJsonArray }?.asJsonArray
+                ?.mapNotNull { sample ->
+                    val arr = sample.takeIf { it.isJsonArray }?.asJsonArray ?: return@mapNotNull null
+                    if (arr.size() < 2) return@mapNotNull null
+                    val time = arr.get(0).takeIf { !it.isJsonNull }?.asLong ?: return@mapNotNull null
+                    val (value, _) = ModelMirror.unpackQuantity(parseValue(arr.get(1)))
+                    ModelMirror.Sample(time, value)
+                }
+                ?: emptyList()
+        }
+    }
+
+    /**
      * Console completion for a partial command line.
      * [complete] is the line extended by the unambiguous common prefix (null
      * when the console has nothing — e.g. empty input); [suggestions] are the
@@ -402,6 +434,72 @@ class SyncClient(private val server: Server) {
     /** Backend session handles are even, non-negative, and fit in a uint32. */
     private fun isBackendHandle(handle: Long): Boolean =
         handle in 0..0xFFFF_FFFFL && handle % 2 == 0L
+
+    // -- log channel --
+
+    /** One parsed syslog line from the backend's log stream. */
+    data class LogEntry(
+        val seq: Long,
+        val receivedAt: Long,
+        /** Syslog severity key ("error", "info", ...) or "unknown". */
+        val severity: String,
+        /** 0 (emergency) .. 7 (debug), 8 for trace, -1 when unparsed. */
+        val severityCode: Int,
+        val tag: String,
+        val message: String,
+        val raw: String,
+    )
+
+    /** Ring buffer of received log lines (newest last), coalesced ~4Hz. */
+    val logs: LiveData<List<LogEntry>> get() = _logs
+    private val _logs = MutableLiveData<List<LogEntry>>(emptyList())
+    private val logBuffer = ArrayDeque<LogEntry>()
+    private var logSeq = 1L
+    private var logPublishJob: Job? = null
+
+    /** Remembered so reconnects re-register the sink. Null = not subscribed. */
+    @Volatile
+    private var logSubscription: Map<String, Any?>? = null
+
+    /**
+     * Register this channel as a backend log sink. [severity] is a syslog key
+     * meaning "up to this severity" (`log_sub`); re-sent after reconnects.
+     */
+    fun subscribeLogs(severity: String = "info", tag: String? = null) {
+        val msg = buildMap<String, Any?> {
+            put("kind", "log_sub")
+            put("severity", severity)
+            if (tag != null) put("tag", tag)
+        }
+        logSubscription = msg
+        ws?.let { sendJson(it, msg) }
+    }
+
+    /** Stop receiving log lines. */
+    fun unsubscribeLogs() {
+        logSubscription = null
+        ws?.let { sendJson(it, mapOf("kind" to "log_sub", "severity" to "off")) }
+    }
+
+    fun clearLogs() {
+        synchronized(lock) { logBuffer.clear() }
+        _logs.postValue(emptyList())
+    }
+
+    private fun appendLog(raw: String) {
+        if (raw.isBlank()) return
+        val entry = parseSyslog(raw.trim(), logSeq++, System.currentTimeMillis())
+        synchronized(lock) {
+            logBuffer.addLast(entry)
+            while (logBuffer.size > MAX_LOG_ENTRIES) logBuffer.removeFirst()
+            if (logPublishJob?.isActive != true) {
+                logPublishJob = scope.launch {
+                    delay(LOG_PUBLISH_MS)
+                    _logs.postValue(synchronized(lock) { logBuffer.toList() })
+                }
+            }
+        }
+    }
 
     private fun openSocket() {
         val url = buildWsUrl()
@@ -515,6 +613,12 @@ class SyncClient(private val server: Server) {
                     resolveError(seq, textMsg)
                 }
             }
+            "log" -> {
+                val msg = json.get("msg")?.takeIf { !it.isJsonNull }?.asString
+                    ?: json.get("payload")?.takeIf { !it.isJsonNull }?.asString
+                    ?: return
+                appendLog(msg)
+            }
         }
     }
 
@@ -565,6 +669,81 @@ class SyncClient(private val server: Server) {
             }
             element.isJsonArray -> element.asJsonArray.map { parseJsonValue(it) }
             else -> element.toString()
+        }
+    }
+
+    companion object {
+        private const val MAX_LOG_ENTRIES = 2000
+        private const val LOG_PUBLISH_MS = 250L
+
+        private val SYSLOG_SEVERITIES = listOf(
+            "emergency", "alert", "critical", "error",
+            "warning", "notice", "info", "debug",
+        )
+
+        /** `<PRI>1 TIMESTAMP HOST APP PROCID MSGID [SD] MSG` (RFC 5424). */
+        private val RFC5424 = Regex("""^(\d+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+([\s\S]*)$""")
+
+        /**
+         * Minimal syslog parse: PRI for severity, RFC-5424 header for the app
+         * tag and message. Anything unparsed falls back to the raw line.
+         * Trace ships as debug(7) plus a leading `[trace]` SD element.
+         */
+        internal fun parseSyslog(raw: String, seq: Long, receivedAt: Long): LogEntry {
+            var severity = "unknown"
+            var severityCode = -1
+            var body = raw
+
+            val priMatch = Regex("""^<(\d{1,3})>([\s\S]*)$""").find(raw)
+            if (priMatch != null) {
+                severityCode = priMatch.groupValues[1].toInt() % 8
+                severity = SYSLOG_SEVERITIES.getOrElse(severityCode) { "unknown" }
+                body = priMatch.groupValues[2].trimStart()
+            }
+
+            var tag = ""
+            var message = body
+            val m = RFC5424.find(body)
+            if (m != null && (m.groupValues[1].toIntOrNull() ?: 0) >= 1) {
+                tag = m.groupValues[4].takeIf { it != "-" } ?: ""
+                message = stripStructuredData(m.groupValues[7])
+                if (severityCode == 7 && m.groupValues[7].startsWith("[trace]")) {
+                    severity = "trace"
+                    severityCode = 8
+                }
+            }
+
+            return LogEntry(seq, receivedAt, severity, severityCode, tag, message, raw)
+        }
+
+        /** Drop leading `[sd-element ...]` blocks (and a bare `-`) from the message. */
+        private fun stripStructuredData(tail: String): String {
+            var text = tail.trimStart()
+            if (text.isEmpty() || text == "-") return ""
+            if (text.startsWith("- ")) return text.substring(2)
+            while (text.startsWith("[")) {
+                var depth = 0
+                var escaped = false
+                var cut = -1
+                for (i in text.indices) {
+                    val ch = text[i]
+                    when {
+                        escaped -> escaped = false
+                        ch == '\\' -> escaped = true
+                        ch == '[' -> depth++
+                        ch == ']' -> {
+                            depth--
+                            if (depth == 0) {
+                                cut = i
+                                break
+                            }
+                        }
+                    }
+                }
+                if (cut < 0) return text
+                text = text.substring(cut + 1).trimStart()
+            }
+            return text
         }
     }
 }

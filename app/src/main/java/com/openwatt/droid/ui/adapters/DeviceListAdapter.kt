@@ -22,6 +22,7 @@ class DeviceListAdapter(
     private val onToggleExpand: (String) -> Unit,
     private val onToggleSwitch: (deviceId: String, switchPath: String, currentValue: Boolean) -> Unit,
     private val onEditValue: (deviceId: String, elementPath: String, elementName: String, currentValue: Any?, unit: String?) -> Unit,
+    private val onShowHistory: (deviceId: String, elementPath: String, elementName: String, unit: String?) -> Unit,
 ) : RecyclerView.Adapter<DeviceListAdapter.DeviceViewHolder>() {
 
     private var devices: List<Device> = emptyList()
@@ -347,12 +348,22 @@ class DeviceListAdapter(
                         bottomMargin = dpToPx(4)
                         marginEnd = dpToPx(4)
                     }
+                    // Writable elements edit on tap and chart on long-press;
+                    // read-only ones chart on tap.
+                    setBackgroundResource(android.R.drawable.list_selector_background)
+                    isClickable = true
+                    isFocusable = true
                     if (isWritable) {
-                        setBackgroundResource(android.R.drawable.list_selector_background)
-                        isClickable = true
-                        isFocusable = true
                         setOnClickListener {
                             onEditValue(device.id, elemPath, displayName, value, unit)
+                        }
+                        setOnLongClickListener {
+                            onShowHistory(device.id, elemPath, displayName, unit)
+                            true
+                        }
+                    } else {
+                        setOnClickListener {
+                            onShowHistory(device.id, elemPath, displayName, unit)
                         }
                     }
                 }
