@@ -99,6 +99,13 @@ class ConsoleViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    /**
+     * Whether the backend serves the `suggest` verb. Unknown until first use;
+     * latched false after a timeout (older decoders drop the frame silently)
+     * so every keystroke doesn't stall waiting on a backend that can't answer.
+     */
+    private var wireSuggestSupported: Boolean? = null
+
     /** Recompute completion suggestions for the current input, debounced. */
     fun onInputChanged(line: String) {
         suggestJob?.cancel()
@@ -109,13 +116,63 @@ class ConsoleViewModel(application: Application) : AndroidViewModel(application)
         suggestJob = viewModelScope.launch {
             delay(SUGGEST_DEBOUNCE_MS)
             val items = try {
-                completer.suggest(line)
+                wireSuggest(line) ?: completer.suggest(line)
             } catch (_: Exception) {
                 emptyList()
             }
             _suggestions.value = SuggestionState(line, items)
         }
     }
+
+    /**
+     * Completion from the backend's real console engine via the sync
+     * `suggest` verb — it sees everything the telnet console does (custom
+     * commands, TabComplete hooks, live value suggestions). Returns null to
+     * fall back to the client-side [completer].
+     */
+    private suspend fun wireSuggest(line: String): List<ConsoleCompleter.Suggestion>? {
+        if (wireSuggestSupported == false) return null
+        val client = syncClient ?: return null
+        return client.suggest(line).fold(
+            onSuccess = { reply ->
+                wireSuggestSupported = true
+                buildWireSuggestions(line, reply)
+            },
+            onFailure = { e ->
+                if (e.message == "request timed out") wireSuggestSupported = false
+                null
+            },
+        )
+    }
+
+    private fun buildWireSuggestions(
+        line: String,
+        reply: com.openwatt.droid.network.SyncClient.SuggestReply,
+    ): List<ConsoleCompleter.Suggestion> {
+        val items = mutableListOf<ConsoleCompleter.Suggestion>()
+
+        // Lead with the tab-complete action when the common prefix extends
+        // the line — one tap does what Tab does on the terminal.
+        val complete = reply.complete
+        if (complete != null && complete.length > line.length && complete.startsWith(line)) {
+            val tail = complete.substringAfterLast(' ')
+            items.add(ConsoleCompleter.Suggestion("⇥ $tail", complete, 0, line.length))
+        }
+
+        // Candidate tokens replace the token under the cursor. A lone
+        // candidate is already covered by the complete chip above.
+        if (reply.suggestions.size > 1 || items.isEmpty()) {
+            val tokenStart = tokenStartOf(line)
+            for (candidate in reply.suggestions.take(ConsoleCompleter.MAX_SUGGESTIONS)) {
+                items.add(ConsoleCompleter.Suggestion(candidate, candidate, tokenStart, line.length))
+            }
+        }
+        return items
+    }
+
+    /** Start of the token under the cursor (path segment, argument, or value). */
+    private fun tokenStartOf(line: String): Int =
+        line.lastIndexOfAny(charArrayOf(' ', '/', '=', ':')) + 1
 
     fun executeCommand(command: String) {
         val server = currentServer ?: return

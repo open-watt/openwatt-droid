@@ -369,6 +369,30 @@ class SyncClient(private val server: Server) {
         }
 
     /**
+     * Console completion for a partial command line.
+     * [complete] is the line extended by the unambiguous common prefix (null
+     * when the console has nothing — e.g. empty input); [suggestions] are the
+     * candidate tokens for the cursor position.
+     */
+    data class SuggestReply(val complete: String?, val suggestions: List<String>)
+
+    /**
+     * Ask the backend console engine for completions ({kind:"suggest"} →
+     * {kind:"suggestions"}). Synchronous and stateless on the server; a short
+     * timeout doubles as feature detection — backends without the verb drop
+     * the frame silently.
+     */
+    suspend fun suggest(text: String, timeoutMs: Long = 3_000): Result<SuggestReply> =
+        request(mapOf("kind" to "suggest", "text" to text), timeoutMs).map { json ->
+            SuggestReply(
+                complete = json.get("complete")?.takeIf { !it.isJsonNull }?.asString,
+                suggestions = json.get("suggestions")?.takeIf { it.isJsonArray }?.asJsonArray
+                    ?.mapNotNull { el -> el.takeIf { it.isJsonPrimitive }?.asString }
+                    ?: emptyList(),
+            )
+        }
+
+    /**
      * Format a backend-allocated session handle for citing back to the
      * backend: the low bit marks it as receiver-allocated. Backend handles
      * are always even, so `h + 1` sets the bit without signed-bitwise traps.
@@ -482,7 +506,7 @@ class SyncClient(private val server: Server) {
                 val signal = json.get("signal")?.asString ?: return
                 store.stateChange(handle, signal)
             }
-            "result", "enum", "res", "history" -> {
+            "result", "enum", "res", "history", "suggestions" -> {
                 if (seq != 0) resolveReply(seq, json)
             }
             "error", "err" -> {
