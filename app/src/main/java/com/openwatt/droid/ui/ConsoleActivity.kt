@@ -1,16 +1,22 @@
 package com.openwatt.droid.ui
 
 import android.content.Intent
+import android.graphics.Typeface
 import android.os.Bundle
+import android.text.Editable
+import android.text.TextWatcher
 import android.view.Menu
 import android.view.MenuItem
+import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.widget.Toast
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
+import com.google.android.material.chip.Chip
 import com.openwatt.droid.R
 import com.openwatt.droid.databinding.ActivityConsoleBinding
 import com.openwatt.droid.repository.ServerRepository
+import com.openwatt.droid.util.ConsoleCompleter
 import com.openwatt.droid.viewmodel.ConsoleViewModel
 
 class ConsoleActivity : AppCompatActivity() {
@@ -56,6 +62,46 @@ class ConsoleActivity : AppCompatActivity() {
         binding.btnClear.setOnClickListener {
             viewModel.clearOutput()
         }
+
+        binding.etCommand.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                viewModel.onInputChanged(s?.toString() ?: "")
+            }
+        })
+    }
+
+    /** Rebuild the predictive-text strip above the input. */
+    private fun showSuggestions(state: ConsoleViewModel.SuggestionState) {
+        // Suggestions were computed for a snapshot of the input; a fast typist
+        // can outrun the debounce, so never apply a stale set.
+        if (state.line != binding.etCommand.text?.toString()) return
+
+        binding.suggestionStrip.removeAllViews()
+        binding.suggestionScroll.visibility =
+            if (state.items.isEmpty()) View.GONE else View.VISIBLE
+        binding.suggestionScroll.scrollTo(0, 0)
+
+        for (suggestion in state.items) {
+            val chip = Chip(this).apply {
+                text = suggestion.label
+                typeface = Typeface.MONOSPACE
+                isCheckable = false
+                setEnsureMinTouchTargetSize(false)
+                setOnClickListener { applySuggestion(suggestion, state.line) }
+            }
+            binding.suggestionStrip.addView(chip)
+        }
+    }
+
+    /** Splice the completion into the input, keeping the keyboard up. */
+    private fun applySuggestion(suggestion: ConsoleCompleter.Suggestion, forLine: String) {
+        val current = binding.etCommand.text?.toString() ?: return
+        if (current != forLine || suggestion.end > current.length) return
+        val newText = current.replaceRange(suggestion.start, suggestion.end, suggestion.replacement)
+        binding.etCommand.setText(newText)
+        binding.etCommand.setSelection(suggestion.start + suggestion.replacement.length)
     }
 
     private fun sendCommand() {
@@ -90,6 +136,10 @@ class ConsoleActivity : AppCompatActivity() {
         viewModel.connectionError.observe(this) {
             Toast.makeText(this, "Server not found", Toast.LENGTH_SHORT).show()
             finish()
+        }
+
+        viewModel.suggestions.observe(this) { state ->
+            showSuggestions(state)
         }
     }
 
