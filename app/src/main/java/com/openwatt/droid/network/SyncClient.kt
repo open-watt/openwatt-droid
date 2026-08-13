@@ -60,6 +60,21 @@ class SyncClient(private val server: Server) {
 
     val store = SyncStore()
 
+    /**
+     * Model-plane mirror (the `device:` namespace — element values, formats,
+     * live feeds). Rides the same socket and seq space; its frames are
+     * delegated from [handleMessage].
+     */
+    val model = ModelMirror(this)
+
+    /** Shared IO scope for the mirror's batching/coalescing coroutines. */
+    internal val ioScope: CoroutineScope get() = scope
+
+    /** Shared live energy model (one subscription + parse for all screens). */
+    val energy: com.openwatt.droid.model.energy.EnergySource by lazy {
+        com.openwatt.droid.model.energy.EnergySource(this)
+    }
+
     private val _connected = MutableLiveData(false)
     val connected: LiveData<Boolean> = _connected
 
@@ -103,6 +118,7 @@ class SyncClient(private val server: Server) {
                     sendJson(webSocket, mapOf("kind" to "sub", "pattern" to pattern))
                 }
             }
+            model.handleOpen()
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
@@ -288,6 +304,7 @@ class SyncClient(private val server: Server) {
         scope.cancel()
         ws?.close(1000, "client shutdown")
         ws = null
+        model.handleClose()
         _connected.postValue(false)
         synchronized(lock) {
             pending.values.forEach { it.onError("client shutdown") }
@@ -297,6 +314,37 @@ class SyncClient(private val server: Server) {
 
     private fun sendJson(socket: WebSocket, msg: Map<String, Any?>) {
         socket.send(gson.toJson(msg))
+    }
+
+    /** Send a frame if the socket is open. Returns false when it isn't. */
+    internal fun sendRaw(msg: Map<String, Any?>): Boolean {
+        val socket = ws ?: return false
+        sendJson(socket, msg)
+        return true
+    }
+
+    /**
+     * Send a seq-correlated request and await its reply frame. Used by the
+     * model plane (acked by `res`/`err`) and other generic requests.
+     */
+    internal suspend fun request(
+        msg: Map<String, Any?>,
+        timeoutMs: Long = 10_000,
+    ): Result<JsonObject> {
+        val socket = ws ?: return Result.failure(IOException("sync socket not connected"))
+        val seq = seqCounter.getAndIncrement()
+        val deferred = CompletableDeferred<Result<JsonObject>>()
+        synchronized(lock) {
+            pending[seq] = PendingRequest(
+                onReply = { json -> deferred.complete(Result.success(json)) },
+                onError = { text -> deferred.complete(Result.failure(IOException(text))) },
+            )
+        }
+        sendJson(socket, msg + ("seq" to seq))
+        return withTimeoutOrNull(timeoutMs) { deferred.await() } ?: run {
+            synchronized(lock) { pending.remove(seq) }
+            Result.failure(IOException("request timed out"))
+        }
     }
 
     /**
@@ -331,6 +379,7 @@ class SyncClient(private val server: Server) {
             names.clear()
             sentPatterns.clear()
             store.clear()
+            model.handleClose()
             pending.values.forEach { it.onError("disconnected") }
             pending.clear()
             reconnectJob = scope.launch {
@@ -355,6 +404,7 @@ class SyncClient(private val server: Server) {
     private fun handleMessage(text: String) {
         val json = gson.fromJson(text, JsonObject::class.java) ?: return
         val kind = json.get("kind")?.asString ?: return
+        if (model.handleFrame(kind, json)) return
         val target = json.get("target")?.takeIf { !it.isJsonNull }?.asLong
         val seq = json.get("seq")?.takeIf { !it.isJsonNull }?.asInt ?: 0
 
@@ -411,7 +461,7 @@ class SyncClient(private val server: Server) {
                 val signal = json.get("signal")?.asString ?: return
                 store.stateChange(handle, signal)
             }
-            "result", "enum" -> {
+            "result", "enum", "res", "history" -> {
                 if (seq != 0) resolveReply(seq, json)
             }
             "error", "err" -> {
@@ -439,6 +489,8 @@ class SyncClient(private val server: Server) {
     )
 
     private class NameEntry(val name: String, val type: String)
+
+    internal fun parseValue(element: JsonElement?): Any? = parseJsonValue(element)
 
     private fun parseJsonValue(element: JsonElement?): Any? {
         if (element == null) return null

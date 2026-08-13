@@ -4,30 +4,26 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
-import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.Observer
 import com.openwatt.droid.model.energy.DetailLevel
+import com.openwatt.droid.model.energy.EnergySource
+import com.openwatt.droid.model.energy.graph.EnergyModel
 import com.openwatt.droid.model.energy.graph.Forest
 import com.openwatt.droid.model.energy.graph.ForestNode
-import com.openwatt.droid.model.energy.graph.EnergyModelParser
 import com.openwatt.droid.model.energy.graph.buildForest
-import com.openwatt.droid.network.OpenWattClient
 import com.openwatt.droid.repository.ServerRepository
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 
 /**
- * Drives the Energy Flow tab. Polls the `energy.circuit.*`/`islands.*` element
- * model via [OpenWattClient.getEnergyElements], parses it into an EnergyModel,
- * and reshapes it into a render [Forest] for the tree view.
+ * Drives the Energy Flow tab. Reads the shared [EnergySource] — the live
+ * `device:energy.**` model feed over /sync — and reshapes each parsed
+ * EnergyModel into a render [Forest] for the tree view.
  */
 class EnergyFlowViewModel(application: Application) : AndroidViewModel(application) {
     private val serverRepository = ServerRepository(application)
-    private val apiClient = OpenWattClient()
 
     private var serverId: String? = null
-    private var pollingJob: Job? = null
+    private var energy: EnergySource? = null
+    private var releaseEnergy: (() -> Unit)? = null
 
     private val _forest = MutableLiveData(Forest(emptyList(), emptyMap()))
     val forest: LiveData<Forest> = _forest
@@ -46,53 +42,48 @@ class EnergyFlowViewModel(application: Application) : AndroidViewModel(applicati
     private val _error = MutableLiveData<String?>(null)
     val error: LiveData<String?> = _error
 
+    private val modelObserver = Observer<EnergyModel?> { model ->
+        if (model == null) return@Observer
+        _forest.value = buildForest(model)
+        _isLoading.value = false
+    }
+
+    private val statusObserver = Observer<EnergySource.Status> { status ->
+        when (status) {
+            EnergySource.Status.UNSUPPORTED -> {
+                _error.value = "Backend does not serve the live energy model"
+                _isLoading.value = false
+            }
+            EnergySource.Status.LOADING -> _isLoading.value = _forest.value?.roots?.isEmpty() != false
+            EnergySource.Status.READY -> _error.value = null
+        }
+    }
+
+    /** Attach to the live feed. Idempotent; re-attaches after [stopPolling]. */
     fun initialize(serverId: String) {
-        if (this.serverId == serverId) return
         this.serverId = serverId
-        loadData()
+        if (releaseEnergy != null) return
+        val server = serverRepository.getServer(serverId) ?: return
+
+        _isLoading.value = _forest.value?.roots?.isEmpty() != false
+        _error.value = null
+
+        val source = com.openwatt.droid.network.SyncClientManager.get(server).energy
+        energy = source
+        releaseEnergy = source.acquire()
+        source.model.observeForever(modelObserver)
+        source.status.observeForever(statusObserver)
     }
 
     fun getNode(nodeKey: String): ForestNode? = _forest.value?.index?.get(nodeKey)
 
-    private fun loadData() {
-        val sid = serverId ?: return
-        val server = serverRepository.getServer(sid) ?: return
-
-        _isLoading.value = true
-        _error.value = null
-
-        viewModelScope.launch {
-            apiClient.getEnergyElements(server)
-                .onSuccess { raw ->
-                    _forest.value = buildForest(EnergyModelParser.parse(raw))
-                    _isLoading.value = false
-                    startPolling()
-                }
-                .onFailure { e ->
-                    _error.value = e.message
-                    _isLoading.value = false
-                }
-        }
-    }
-
-    private fun startPolling() {
-        pollingJob?.cancel()
-        val sid = serverId ?: return
-        val server = serverRepository.getServer(sid) ?: return
-
-        pollingJob = viewModelScope.launch {
-            while (isActive) {
-                delay(2000)
-                apiClient.getEnergyElements(server).onSuccess { raw ->
-                    _forest.value = buildForest(EnergyModelParser.parse(raw))
-                }
-            }
-        }
-    }
-
+    /** Detach from the live feed while the screen is off-stage. */
     fun stopPolling() {
-        pollingJob?.cancel()
-        pollingJob = null
+        energy?.model?.removeObserver(modelObserver)
+        energy?.status?.removeObserver(statusObserver)
+        releaseEnergy?.invoke()
+        releaseEnergy = null
+        energy = null
     }
 
     fun selectNode(nodeKey: String?) {
@@ -115,10 +106,8 @@ class EnergyFlowViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun retry() {
-        serverId?.let {
-            this.serverId = null
-            initialize(it)
-        }
+        stopPolling()
+        serverId?.let { initialize(it) }
     }
 
     override fun onCleared() {

@@ -10,11 +10,12 @@ import com.openwatt.droid.model.energy.ApplianceSummary
 import com.openwatt.droid.model.energy.ChartData
 import com.openwatt.droid.model.energy.ChartPeriod
 import com.openwatt.droid.model.energy.PeriodTotal
+import androidx.lifecycle.Observer
+import com.openwatt.droid.model.energy.EnergySource
 import com.openwatt.droid.model.energy.graph.EnergyModel
-import com.openwatt.droid.model.energy.graph.EnergyModelParser
 import com.openwatt.droid.model.energy.graph.Forest
 import com.openwatt.droid.model.energy.graph.buildForest
-import com.openwatt.droid.network.OpenWattClient
+import com.openwatt.droid.network.SyncClientManager
 import com.openwatt.droid.repository.ServerRepository
 import com.openwatt.droid.ui.energy.EnergyFormatters
 import kotlinx.coroutines.Job
@@ -23,18 +24,20 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
- * Drives the Energy Summary tab from the `circuit.*` element model. Headline
- * grid figures come from the primary island's grid account (falling back to the
- * root bus); the appliance ranking comes from the forest's appliance nodes.
- * Non-realtime chart periods remain stubbed pending a backend history API.
+ * Drives the Energy Summary tab from the shared [EnergySource] — the live
+ * `device:energy.**` model feed over /sync. Headline grid figures come from
+ * the primary island's grid account (falling back to the root bus); the
+ * appliance ranking comes from the forest's appliance nodes. Non-realtime
+ * chart periods remain stubbed pending backend history integration.
  */
 class EnergySummaryViewModel(application: Application) : AndroidViewModel(application) {
     private val serverRepository = ServerRepository(application)
-    private val apiClient = OpenWattClient()
 
     private var serverId: String? = null
-    private var pollingJob: Job? = null
+    private var samplingJob: Job? = null
     private var lastModel: EnergyModel? = null
+    private var energy: EnergySource? = null
+    private var releaseEnergy: (() -> Unit)? = null
 
     /** Whole-home grid headline: live power + today's import/export (kWh). */
     data class Headline(val power: Double?, val importKwh: Double?, val exportKwh: Double?)
@@ -65,15 +68,45 @@ class EnergySummaryViewModel(application: Application) : AndroidViewModel(applic
 
     // Chart history buffer — always full-width (10 minutes at 2s intervals).
     private val maxHistoryPoints = 300
-    private val pollIntervalMs = 2000L
+    private val sampleIntervalMs = 2000L
     private val historyTimestamps = mutableListOf<Long>()
     private val historyPower = mutableListOf<Float>()
 
+    private val modelObserver = Observer<EnergyModel?> { model ->
+        if (model == null) return@Observer
+        process(model)
+        _isLoading.value = false
+    }
+
+    private val statusObserver = Observer<EnergySource.Status> { status ->
+        when (status) {
+            EnergySource.Status.UNSUPPORTED -> {
+                _error.value = "Backend does not serve the live energy model"
+                _isLoading.value = false
+            }
+            EnergySource.Status.READY -> _error.value = null
+            EnergySource.Status.LOADING -> {}
+        }
+    }
+
+    /** Attach to the live feed. Idempotent; re-attaches after [stopPolling]. */
     fun initialize(serverId: String) {
-        if (this.serverId == serverId) return
-        this.serverId = serverId
-        prefillHistory()
-        loadData()
+        if (this.serverId != serverId) {
+            this.serverId = serverId
+            prefillHistory()
+        }
+        if (releaseEnergy != null) return
+        val server = serverRepository.getServer(serverId) ?: return
+
+        _isLoading.value = lastModel == null
+        _error.value = null
+
+        val source = SyncClientManager.get(server).energy
+        energy = source
+        releaseEnergy = source.acquire()
+        source.model.observeForever(modelObserver)
+        source.status.observeForever(statusObserver)
+        startSampling()
     }
 
     /** Pre-fill the buffer with zeroes so the chart is always full-width. */
@@ -82,44 +115,23 @@ class EnergySummaryViewModel(application: Application) : AndroidViewModel(applic
         historyPower.clear()
         val now = System.currentTimeMillis()
         for (i in 0 until maxHistoryPoints) {
-            historyTimestamps.add(now - (maxHistoryPoints - 1 - i) * pollIntervalMs)
+            historyTimestamps.add(now - (maxHistoryPoints - 1 - i) * sampleIntervalMs)
             historyPower.add(0f)
         }
         publishChart()
     }
 
-    private fun loadData() {
-        val sid = serverId ?: return
-        val server = serverRepository.getServer(sid) ?: return
-
-        _isLoading.value = true
-        _error.value = null
-
-        viewModelScope.launch {
-            apiClient.getEnergyElements(server)
-                .onSuccess { raw ->
-                    process(EnergyModelParser.parse(raw))
-                    _isLoading.value = false
-                    startPolling()
-                }
-                .onFailure { e ->
-                    _error.value = e.message
-                    _isLoading.value = false
-                }
-        }
-    }
-
-    private fun startPolling() {
-        pollingJob?.cancel()
-        val sid = serverId ?: return
-        val server = serverRepository.getServer(sid) ?: return
-
-        pollingJob = viewModelScope.launch {
+    /**
+     * Sample the headline power on a fixed cadence so the realtime chart
+     * keeps a regular time axis — model updates arrive at the feed's rate,
+     * not the chart's.
+     */
+    private fun startSampling() {
+        samplingJob?.cancel()
+        samplingJob = viewModelScope.launch {
             while (isActive) {
-                delay(pollIntervalMs)
-                apiClient.getEnergyElements(server).onSuccess { raw ->
-                    process(EnergyModelParser.parse(raw))
-                }
+                delay(sampleIntervalMs)
+                collectHistoryPoint(_headline.value?.power)
             }
         }
     }
@@ -129,7 +141,6 @@ class EnergySummaryViewModel(application: Application) : AndroidViewModel(applic
         val forest = buildForest(model)
         val head = gridHeadline(model, forest)
         _headline.value = head
-        collectHistoryPoint(head.power)
         _summaries.value = buildSummaries(forest)
         updatePeriodTotals(model, head)
     }
@@ -231,15 +242,19 @@ class EnergySummaryViewModel(application: Application) : AndroidViewModel(applic
     }
 
     fun retry() {
-        serverId?.let {
-            this.serverId = null
-            initialize(it)
-        }
+        stopPolling()
+        serverId?.let { initialize(it) }
     }
 
+    /** Detach from the live feed while the screen is off-stage. */
     fun stopPolling() {
-        pollingJob?.cancel()
-        pollingJob = null
+        samplingJob?.cancel()
+        samplingJob = null
+        energy?.model?.removeObserver(modelObserver)
+        energy?.status?.removeObserver(statusObserver)
+        releaseEnergy?.invoke()
+        releaseEnergy = null
+        energy = null
     }
 
     private fun numOf(v: Any?): Double? = (v as? Number)?.toDouble()

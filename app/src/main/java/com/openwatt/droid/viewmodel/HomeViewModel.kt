@@ -4,26 +4,42 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
+import androidx.lifecycle.Observer
 import androidx.lifecycle.viewModelScope
 import com.openwatt.droid.model.Archetypes
 import com.openwatt.droid.model.DeviceManager
 import com.openwatt.droid.model.HomeSwitch
 import com.openwatt.droid.model.ValueFormatter
 import com.openwatt.droid.model.energy.EnergyFlowState
+import com.openwatt.droid.model.energy.EnergySource
 import com.openwatt.droid.model.energy.EvFlowState
 import com.openwatt.droid.model.energy.ManagerData
 import com.openwatt.droid.model.energy.ScorecardData
 import com.openwatt.droid.model.energy.graph.EnergyModel
-import com.openwatt.droid.model.energy.graph.EnergyModelParser
 import com.openwatt.droid.model.energy.graph.Forest
 import com.openwatt.droid.model.energy.graph.buildForest
+import com.openwatt.droid.network.ModelMirror
 import com.openwatt.droid.network.OpenWattClient
+import com.openwatt.droid.network.SyncClient
+import com.openwatt.droid.network.SyncClientManager
 import com.openwatt.droid.repository.ServerRepository
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 
+/**
+ * Drives the Home screen: quick-control switches plus the energy diamond,
+ * scorecard and manager panels.
+ *
+ * Device *structure* still comes from `POST /api/list` on a slow refresh (the
+ * model plane's `add` frames carry no component templates, and removal is
+ * only visible through a re-list). Switch *values* ride live model-plane
+ * subscriptions — one `device:<id>.<path>.**` pattern per switch — and the
+ * energy panels read the shared [EnergySource]. Writes go through the model
+ * plane's `set`; the feed echoes the applied value back.
+ */
 class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val serverRepository = ServerRepository(application)
     private val apiClient = OpenWattClient()
@@ -51,12 +67,66 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     val manager: LiveData<ManagerData?> = _manager
 
     private var serverId: String? = null
-    private var valuePollingJob: Job? = null
+    private var syncClient: SyncClient? = null
     private var listPollingJob: Job? = null
+    private var attached = false
 
+    private var energy: EnergySource? = null
+    private var releaseEnergy: (() -> Unit)? = null
+
+    /** Live switch feeds, keyed by pattern. */
+    private val switchSubs = mutableMapOf<String, ModelMirror.Subscription>()
+
+    /** Coalesced UI refresh after live switch updates. */
+    private var switchRefreshJob: Job? = null
+
+    private val mirrorListener = object : ModelMirror.Listener {
+        override fun onChange(dirty: Set<ModelMirror.Node>) {
+            // Fold moved element values into the device model, then rebuild
+            // the switch list once per coalescing window.
+            val entries = dirty
+                .filter { it.ns == "device" && !it.isDevice }
+                .associate { it.path to mapOf("value" to it.value, "unit" to it.unit) }
+            if (entries.isEmpty()) return
+            deviceManager.updateValues(entries)
+            scheduleSwitchRefresh()
+        }
+    }
+
+    private val energyModelObserver = Observer<EnergyModel?> { model ->
+        if (model == null) return@Observer
+        val forest = buildForest(model)
+        val available = model.hasTopology || model.islands.isNotEmpty()
+        _energyAvailable.value = available
+        _energyFlowState.value = if (available) deriveDiamond(model, forest) else null
+        _scorecard.value = buildScorecard(model)
+        _manager.value = buildManager(model)
+    }
+
+    private val energyStatusObserver = Observer<EnergySource.Status> { status ->
+        if (status == EnergySource.Status.UNSUPPORTED) {
+            _energyAvailable.value = false
+            _energyFlowState.value = null
+        }
+    }
+
+    /** Attach to the live feeds. Idempotent; re-attaches after [stopPolling]. */
     fun initialize(serverId: String) {
-        if (this.serverId == serverId && _switches.value?.isNotEmpty() == true) return
         this.serverId = serverId
+        if (attached) return
+        attached = true
+
+        val server = serverRepository.getServer(serverId) ?: return
+        val client = SyncClientManager.get(server)
+        syncClient = client
+
+        client.model.addListener(mirrorListener)
+        val source = client.energy
+        energy = source
+        releaseEnergy = source.acquire()
+        source.model.observeForever(energyModelObserver)
+        source.status.observeForever(energyStatusObserver)
+
         loadDevices()
     }
 
@@ -72,7 +142,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 structureResult.onSuccess { structure ->
                     deviceManager.initFromList(structure)
 
-                    // Fetch info + switch types (once)
+                    // Static identity (info + switch types), fetched once.
                     val infoPaths = deviceManager.getInfoPaths()
                     if (infoPaths.isNotEmpty()) {
                         apiClient.getValues(server, infoPaths).onSuccess { values ->
@@ -80,14 +150,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
 
-                    // Fetch initial switch values
-                    refreshSwitchValues()
+                    reconcileSwitchSubscriptions()
                     _switches.value = buildSwitchList()
-
-                    // Fetch initial energy state
-                    refreshEnergy()
-
-                    startPolling()
+                    startListPolling()
                 }.onFailure { e ->
                     _error.value = e.message ?: "Failed to load devices"
                 }
@@ -96,6 +161,34 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             } finally {
                 _isLoading.value = false
             }
+        }
+    }
+
+    /**
+     * One live pattern per switch subtree — covers the switch state, its type
+     * and its meter elements. The mirror batches sub/unsub frames, so a whole
+     * screenful arms in one frame each way.
+     */
+    private fun reconcileSwitchSubscriptions() {
+        val client = syncClient ?: return
+        if (!attached) return
+        val wanted = deviceManager.getAll().flatMap { device ->
+            device.getSwitchComponents().map { sw -> "device:${device.id}.${sw.path}.**" }
+        }.toSet()
+
+        for (pattern in switchSubs.keys.toList()) {
+            if (pattern !in wanted) switchSubs.remove(pattern)?.release()
+        }
+        for (pattern in wanted) {
+            if (pattern !in switchSubs) switchSubs[pattern] = client.model.subscribe(pattern)
+        }
+    }
+
+    private fun scheduleSwitchRefresh() {
+        if (switchRefreshJob?.isActive == true) return
+        switchRefreshJob = viewModelScope.launch {
+            delay(SWITCH_REFRESH_MS)
+            _switches.value = buildSwitchList()
         }
     }
 
@@ -137,52 +230,16 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Get paths needed for switch polling */
-    private fun getSwitchPaths(): List<String> {
-        return deviceManager.getAll().flatMap { device ->
-            device.getSwitchComponents().flatMap { sw ->
-                val base = "${device.id}.${sw.path}"
-                val paths = mutableListOf("$base.switch")
-                // Meter data if available
-                sw.component.components["meter"]?.let { meter ->
-                    for (elemId in meter.elements.keys) {
-                        paths.add("$base.meter.$elemId")
-                    }
-                }
-                paths
-            }
-        }
-    }
-
-    private suspend fun refreshSwitchValues() {
-        val server = serverId?.let { serverRepository.getServer(it) } ?: return
-        val paths = getSwitchPaths()
-        if (paths.isEmpty()) return
-
-        apiClient.getValues(server, paths).onSuccess { values ->
-            deviceManager.updateValues(values)
-        }
-    }
-
-    private fun startPolling() {
-        stopPolling()
-
-        // Fast poll: switch + energy values every 2 seconds
-        valuePollingJob = viewModelScope.launch {
-            while (true) {
-                delay(2000)
-                try {
-                    refreshSwitchValues()
-                    _switches.value = buildSwitchList()
-                    refreshEnergy()
-                } catch (_: Exception) { }
-            }
-        }
-
-        // Slow poll: device list every 15 seconds (new switches may appear)
+    /**
+     * Slow structure refresh: the model plane has no `gone` verb and its
+     * `add` frames carry no component templates, so new/removed switches are
+     * only visible through a re-list.
+     */
+    private fun startListPolling() {
+        listPollingJob?.cancel()
         listPollingJob = viewModelScope.launch {
-            while (true) {
-                delay(15000)
+            while (isActive) {
+                delay(LIST_REFRESH_MS)
                 try {
                     val server = serverId?.let { serverRepository.getServer(it) } ?: continue
                     apiClient.listDevices(server).onSuccess { structure ->
@@ -205,6 +262,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                         }
 
                         if (added.isNotEmpty() || (previousIds - currentIds).isNotEmpty()) {
+                            reconcileSwitchSubscriptions()
                             _switches.value = buildSwitchList()
                         }
                     }
@@ -213,27 +271,38 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Detach from the live feeds while the screen is off-stage. */
     fun stopPolling() {
-        valuePollingJob?.cancel()
-        valuePollingJob = null
+        attached = false
         listPollingJob?.cancel()
         listPollingJob = null
+        switchRefreshJob?.cancel()
+        switchRefreshJob = null
+        switchSubs.values.forEach { it.release() }
+        switchSubs.clear()
+        syncClient?.model?.removeListener(mirrorListener)
+        energy?.model?.removeObserver(energyModelObserver)
+        energy?.status?.removeObserver(energyStatusObserver)
+        releaseEnergy?.invoke()
+        releaseEnergy = null
+        energy = null
+        syncClient = null
     }
 
-    /** Toggle a switch on/off */
+    /** Toggle a switch on/off via the model plane's element write. */
     fun toggleSwitch(deviceId: String, switchPath: String, currentValue: Boolean) {
-        val server = serverId?.let { serverRepository.getServer(it) } ?: return
+        val client = syncClient ?: return
         val fullPath = "$deviceId.$switchPath.switch"
         val newValue = !currentValue
 
         viewModelScope.launch {
-            try {
-                apiClient.setValues(server, mapOf(fullPath to newValue)).onSuccess {
-                    refreshSwitchValues()
-                    _switches.value = buildSwitchList()
-                }
-            } catch (_: Exception) {
-                // Refresh to revert UI to actual state
+            client.model.setValue(fullPath, newValue).onSuccess { applied ->
+                // `res` carries the applied value; the feed echoes it too, but
+                // fold it in now so the toggle doesn't visibly lag.
+                deviceManager.updateValues(mapOf(fullPath to mapOf("value" to applied)))
+                _switches.value = buildSwitchList()
+            }.onFailure {
+                // Revert UI to actual state
                 _switches.value = buildSwitchList()
             }
         }
@@ -244,30 +313,6 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // --- Energy (diamond + scorecard + manager) ---
-
-    private suspend fun refreshEnergy() {
-        val server = serverId?.let { serverRepository.getServer(it) } ?: return
-
-        val energy = apiClient.getEnergyElements(server).getOrNull()
-        if (energy == null) {
-            _energyAvailable.value = false
-            _energyFlowState.value = null
-            return
-        }
-        val planner = apiClient.getPlannerElements(server).getOrNull()
-
-        val merged = HashMap<String, Any?>(energy)
-        if (planner != null) merged.putAll(planner)
-
-        val model = EnergyModelParser.parse(merged)
-        val forest = buildForest(model)
-
-        val available = model.hasTopology || model.islands.isNotEmpty()
-        _energyAvailable.value = available
-        _energyFlowState.value = if (available) deriveDiamond(model, forest) else null
-        _scorecard.value = buildScorecard(model)
-        _manager.value = buildManager(model)
-    }
 
     /**
      * Derive the diamond flow state. Prefer the primary (grid) island account
@@ -429,6 +474,12 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     companion object {
+        /** Slow structure re-list cadence (matches the web client). */
+        private const val LIST_REFRESH_MS = 15_000L
+
+        /** Coalescing window between live-update switch list rebuilds. */
+        private const val SWITCH_REFRESH_MS = 500L
+
         private fun humanizeId(id: String): String {
             return id.replace(Regex("[_-]"), " ")
                 .replaceFirstChar { it.uppercase() }
