@@ -73,11 +73,11 @@ class ConfigListFragment : Fragment() {
 
         adapter = ConfigListAdapter(
             schema = currentSchema,
-            onItemClick = { item -> editItem(item.cid) },
+            onItemClick = { item -> editItem(item) },
             onItemLongClick = { item -> showContextMenu(item) },
         )
-        adapter.rateHistoryProvider = { cid -> viewModel.getRateHistory(cid) }
-        adapter.highWaterMarkProvider = { cid -> viewModel.getHighWaterMarks(cid) }
+        adapter.rateHistoryProvider = { handle -> viewModel.getRateHistory(handle) }
+        adapter.highWaterMarkProvider = { handle -> viewModel.getHighWaterMarks(handle) }
 
         binding.itemsRecycler.layoutManager = LinearLayoutManager(requireContext())
         binding.itemsRecycler.adapter = adapter
@@ -103,7 +103,11 @@ class ConfigListFragment : Fragment() {
 
         observeViewModel()
 
-        serverId?.let { viewModel.initialize(it, currentSchema) }
+        // Items on the sync channel are filtered by concrete type name, so
+        // hand the viewmodel every member type of this collection (keys and
+        // typeName fields both, in case they diverge).
+        val memberTypeNames = memberTypes.keys + memberTypes.values.map { it.typeName }
+        serverId?.let { viewModel.initialize(it, currentSchema, memberTypeNames) }
         adapter.rateKeys = viewModel.getRateKeys()
     }
 
@@ -188,20 +192,21 @@ class ConfigListFragment : Fragment() {
     }
 
     /** Look up the schema for an existing item by its sync type, with fallbacks. */
-    private fun schemaForItem(cid: Int): CollectionSchema {
+    private fun schemaForItem(item: SyncItem): CollectionSchema {
         val main = schema!!
-        val type = viewModel.getItem(cid)?.type ?: return main
+        val type = item.type
         if (type.isEmpty()) return main
         memberTypes[type]?.let { return it }
         memberTypes.entries.firstOrNull { it.key.equals(type, ignoreCase = true) }?.let { return it.value }
+        memberTypes.values.firstOrNull { it.typeName.equals(type, ignoreCase = true) }?.let { return it }
         return main
     }
 
-    private fun navigateToEditor(cid: Int?, typeSchema: CollectionSchema) {
+    private fun navigateToEditor(item: SyncItem?, typeSchema: CollectionSchema) {
         val sid = serverId ?: return
         val name = collectionName ?: return
 
-        val fragment = ConfigEditorFragment.newInstance(sid, name, typeSchema, cid)
+        val fragment = ConfigEditorFragment.newInstance(sid, name, typeSchema, item)
         parentFragmentManager.beginTransaction()
             .replace(id, fragment)
             .addToBackStack(null)
@@ -209,8 +214,8 @@ class ConfigListFragment : Fragment() {
     }
 
     /** Edit path for an existing item: resolve the correct schema by item type. */
-    private fun editItem(cid: Int) {
-        navigateToEditor(cid, schemaForItem(cid))
+    private fun editItem(item: SyncItem) {
+        navigateToEditor(item, schemaForItem(item))
     }
 
     private fun showContextMenu(item: SyncItem) {
@@ -224,7 +229,7 @@ class ConfigListFragment : Fragment() {
             setOnMenuItemClickListener { menuItem ->
                 when (menuItem.itemId) {
                     MENU_EDIT -> {
-                        editItem(item.cid)
+                        editItem(item)
                         true
                     }
                     MENU_DELETE -> {
@@ -241,9 +246,9 @@ class ConfigListFragment : Fragment() {
     private fun confirmDelete(item: SyncItem) {
         AlertDialog.Builder(requireContext())
             .setTitle("Delete Item")
-            .setMessage("Delete \"${item.name ?: "#${item.cid}"}\"?")
+            .setMessage("Delete \"${item.name ?: "#${item.handle}"}\"?")
             .setPositiveButton("Delete") { _, _ ->
-                viewModel.deleteItem(item.cid)
+                viewModel.deleteItem(item.handle)
             }
             .setNegativeButton("Cancel", null)
             .show()

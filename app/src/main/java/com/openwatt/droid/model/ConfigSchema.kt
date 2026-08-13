@@ -11,7 +11,10 @@ data class CollectionSchema(
     val collection: Boolean,
     /** True = cannot be instantiated directly (container-only). */
     val abstract: Boolean,
-    /** Numeric collection identifier (0–63). Encoded in top 6 bits of item CIDs. */
+    /** Numeric collection identifier. Build-local — only meaningful for grouping
+     *  member types within one schema fetch; never persist or compare across
+     *  connections (the sync channel identifies objects by session handle and
+     *  type/name, not by any persistent id). */
     val collectionId: Int,
     /** Type-name string — matches the `type` field in sync bind/create messages. */
     val typeName: String = "",

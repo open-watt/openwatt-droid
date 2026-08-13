@@ -5,23 +5,34 @@ import androidx.lifecycle.MutableLiveData
 import com.openwatt.droid.model.SyncItem
 
 /**
- * In-memory store of proxies learned via the sync WebSocket, keyed by CID.
- * Publishes the full map on each mutation via [items].
+ * In-memory store of proxies learned via the sync WebSocket, keyed by
+ * session handle. Publishes the full map on each mutation via [items].
  *
- * Single global store per SyncClient — subscribers filter by collectionId
- * (or look up a specific CID) rather than getting per-pattern channels,
+ * Single global store per SyncClient — subscribers filter by type name
+ * (or look up a specific handle) rather than getting per-pattern channels,
  * because the server's messages don't carry pattern routing info.
+ *
+ * Handles are session-scoped: the client clears the store on every attach
+ * boundary, so a handle never outlives the socket that introduced it.
  */
 class SyncStore {
     private val lock = Any()
-    private val map = mutableMapOf<Int, SyncItem>()
+    private val map = mutableMapOf<Long, SyncItem>()
     /** Schema defaults, keyed by type name. Used to seed / restore unset props. */
     private var typeDefaults: Map<String, Map<String, Any?>> = emptyMap()
 
-    private val _items = MutableLiveData<Map<Int, SyncItem>>(emptyMap())
-    val items: LiveData<Map<Int, SyncItem>> = _items
+    private val _items = MutableLiveData<Map<Long, SyncItem>>(emptyMap())
+    val items: LiveData<Map<Long, SyncItem>> = _items
 
-    fun getItem(cid: Int): SyncItem? = synchronized(lock) { map[cid] }
+    fun getItem(handle: Long): SyncItem? = synchronized(lock) { map[handle] }
+
+    /**
+     * Look an item up by its persistent identity. Used to re-acquire a fresh
+     * handle after a reconnect invalidates the one a screen was holding.
+     */
+    fun findItem(type: String, name: String): SyncItem? = synchronized(lock) {
+        map.values.firstOrNull { it.type == type && it.name == name }
+    }
 
     /**
      * Register schema defaults per type — called once per server after `/api/schema`
@@ -32,10 +43,10 @@ class SyncStore {
         synchronized(lock) {
             typeDefaults = defaults
             if (map.isEmpty()) return
-            for ((cid, item) in map.toMap()) {
+            for ((handle, item) in map.toMap()) {
                 val td = defaults[item.type] ?: continue
                 val setValues = item.properties.filterKeys { it in item.setProps }
-                map[cid] = item.copy(properties = td + setValues)
+                map[handle] = item.copy(properties = td + setValues)
             }
             publish()
         }
@@ -49,12 +60,12 @@ class SyncStore {
      * the UI always has something meaningful to show; [setProps] only records
      * what the backend has actually set.
      */
-    fun bind(cid: Int, type: String, props: Map<String, Any?>) {
+    fun bind(handle: Long, type: String, props: Map<String, Any?>) {
         synchronized(lock) {
-            val existing = map[cid]
+            val existing = map[handle]
             val defaults = typeDefaults[type] ?: emptyMap()
-            map[cid] = SyncItem(
-                cid = cid,
+            map[handle] = SyncItem(
+                handle = handle,
                 type = type,
                 properties = defaults + props,
                 setProps = props.keys.toSet(),
@@ -64,16 +75,16 @@ class SyncStore {
         }
     }
 
-    fun unbind(cid: Int) {
+    fun unbind(handle: Long) {
         synchronized(lock) {
-            if (map.remove(cid) != null) publish()
+            if (map.remove(handle) != null) publish()
         }
     }
 
-    fun setProperty(cid: Int, property: String, value: Any?) {
+    fun setProperty(handle: Long, property: String, value: Any?) {
         synchronized(lock) {
-            val item = map[cid] ?: return
-            map[cid] = item.copy(
+            val item = map[handle] ?: return
+            map[handle] = item.copy(
                 properties = item.properties + (property to value),
                 setProps = item.setProps + property,
             )
@@ -81,17 +92,21 @@ class SyncStore {
         }
     }
 
-    /** Revert a property to its schema default (or drop it if no default). */
-    fun resetProperty(cid: Int, property: String) {
+    /**
+     * Revert a property to its default. The server's `reset` echo carries the
+     * effective default when one exists ([hasValue]); otherwise fall back to
+     * the schema default, or drop the property entirely.
+     */
+    fun resetProperty(handle: Long, property: String, value: Any? = null, hasValue: Boolean = false) {
         synchronized(lock) {
-            val item = map[cid] ?: return
+            val item = map[handle] ?: return
             val td = typeDefaults[item.type]
-            val newProps = if (td != null && property in td) {
-                item.properties + (property to td[property])
-            } else {
-                item.properties - property
+            val newProps = when {
+                hasValue -> item.properties + (property to value)
+                td != null && property in td -> item.properties + (property to td[property])
+                else -> item.properties - property
             }
-            map[cid] = item.copy(
+            map[handle] = item.copy(
                 properties = newProps,
                 setProps = item.setProps - property,
             )
@@ -99,10 +114,10 @@ class SyncStore {
         }
     }
 
-    fun stateChange(cid: Int, signal: String) {
+    fun stateChange(handle: Long, signal: String) {
         synchronized(lock) {
-            val item = map[cid] ?: return
-            map[cid] = item.copy(state = signal)
+            val item = map[handle] ?: return
+            map[handle] = item.copy(state = signal)
             publish()
         }
     }

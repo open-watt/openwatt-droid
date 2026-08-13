@@ -45,7 +45,9 @@ class ConfigEditorViewModel(application: Application) : AndroidViewModel(applica
 
     private var serverId: String? = null
     private var schema: CollectionSchema? = null
-    private var itemCid: Int? = null
+    private var itemHandle: Long? = null
+    private var itemType: String? = null
+    private var itemName: String? = null
     private var itemPattern: String? = null
     private var syncClient: SyncClient? = null
 
@@ -58,9 +60,22 @@ class ConfigEditorViewModel(application: Application) : AndroidViewModel(applica
     private val _rateHistoryVersion = MutableLiveData(0L)
     val rateHistoryVersion: LiveData<Long> = _rateHistoryVersion
 
-    private val storeObserver = Observer<Map<Int, SyncItem>> { snapshot ->
-        val cid = itemCid ?: return@Observer
-        _liveItem.value = snapshot[cid]
+    private val storeObserver = Observer<Map<Long, SyncItem>> { snapshot ->
+        val handle = itemHandle
+        var item = handle?.let { snapshot[it] }
+        if (item == null) {
+            // Handles are session-scoped: after a reconnect the item comes
+            // back under a fresh handle. Re-acquire it by (type, name).
+            val type = itemType
+            val name = itemName
+            if (type != null && name != null) {
+                item = snapshot.values.firstOrNull { it.type == type && it.name == name }
+                if (item != null) itemHandle = item.handle
+            }
+        }
+        // Track renames so later writes (comment, save) still resolve.
+        item?.name?.let { itemName = it }
+        _liveItem.value = item
     }
 
     fun initialize(serverId: String, schema: CollectionSchema) {
@@ -88,26 +103,27 @@ class ConfigEditorViewModel(application: Application) : AndroidViewModel(applica
     }
 
     /**
-     * Start observing live updates for a single item by CID. Installs a
-     * narrow `#<cid>` subscription so the server only pushes updates for
-     * this one item while the editor is open. Idempotent against repeat
-     * calls for the same CID (the fragment currently calls twice).
+     * Start observing live updates for a single item. Installs a narrow
+     * `=<type>:<name>` subscription so the server only pushes updates for
+     * this one item while the editor is open (`=` pins the exact concrete
+     * type). Identity is (type, name) — the session [handle] is only a
+     * fast-path key that a reconnect invalidates; the store observer
+     * re-acquires the fresh handle by name. Idempotent against repeat
+     * calls for the same item (the fragment currently calls twice).
      *
-     * NOTE: `#<cid>` is stable only until a rename — a rename triggers a
-     * rekey event on the server. Rekey handling isn't implemented yet, so
-     * renaming an item while it's open in the editor will orphan this sub.
+     * NOTE: the pattern is stable only until a rename — renaming an item
+     * while it's open in the editor orphans this sub (same limitation as
+     * the web client's editor windows).
      */
-    fun startObserving(cid: Int) {
-        if (itemCid == cid && itemPattern != null) return
+    fun startObserving(handle: Long, type: String, name: String?) {
+        if (itemHandle == handle && itemPattern != null) return
         stopObserving()
-        itemCid = cid
+        itemHandle = handle
+        itemType = type
+        itemName = name
         val client = syncClient ?: return
-        _liveItem.value = client.store.getItem(cid)
-        // CIDs are uint32; a high collection_id sets bit 31, making the Kotlin Int
-        // negative. Format it unsigned so the pattern isn't "#-2013265919", which
-        // the backend's unsigned `#<decimal>` matcher rejects — that silently
-        // killed live updates for high-collection-id objects like streams.
-        val pattern = "#${cid.toUInt()}"
+        _liveItem.value = client.store.getItem(handle)
+        val pattern = if (name != null) "=$type:$name" else "$type:*"
         itemPattern = pattern
         client.subscribe(pattern)
         client.store.items.observeForever(storeObserver)
@@ -140,8 +156,8 @@ class ConfigEditorViewModel(application: Application) : AndroidViewModel(applica
     }
 
     private fun recordSample() {
-        val cid = itemCid ?: return
-        val item = syncClient?.store?.getItem(cid) ?: return
+        val handle = itemHandle ?: return
+        val item = syncClient?.store?.getItem(handle) ?: return
         val size = ConfigListViewModel.HISTORY_SIZE
         for (key in chartKeys) {
             val value = extractNumericValue(item.properties[key]) ?: continue
@@ -162,7 +178,7 @@ class ConfigEditorViewModel(application: Application) : AndroidViewModel(applica
     /** Rate-history ring buffers for the open item, keyed by field. */
     fun getRateHistory(): Map<String, FloatArray> = rateHistory
 
-    fun currentItem(): SyncItem? = itemCid?.let { syncClient?.store?.getItem(it) }
+    fun currentItem(): SyncItem? = itemHandle?.let { syncClient?.store?.getItem(it) }
 
     override fun onCleared() {
         super.onCleared()
@@ -214,8 +230,8 @@ class ConfigEditorViewModel(application: Application) : AndroidViewModel(applica
                         _saveResult.value = SaveResult.Error(e.message ?: "Failed to add item")
                     }
                 } else {
-                    val cid = itemCid
-                    if (cid == null) {
+                    val handle = itemHandle
+                    if (handle == null) {
                         _saveResult.value = SaveResult.Error("No target item")
                         return@launch
                     }
@@ -230,9 +246,9 @@ class ConfigEditorViewModel(application: Application) : AndroidViewModel(applica
                             originalValue.toString().isNotEmpty()
                         ) {
                             // Field was cleared — reset to default
-                            client.resetProperty(cid, key)
+                            client.resetProperty(handle, key)
                         } else if (strValue.isNotEmpty()) {
-                            client.setProperty(cid, key, coerceForWire(value))
+                            client.setProperty(handle, key, coerceForWire(value))
                         }
                     }
 
@@ -308,13 +324,13 @@ class ConfigEditorViewModel(application: Application) : AndroidViewModel(applica
      * Set/clear the comment on an existing item immediately.
      */
     fun setComment(comment: String) {
-        val cid = itemCid ?: return
+        val handle = itemHandle ?: return
         val client = syncClient ?: return
 
         if (comment.isNotEmpty()) {
-            client.setProperty(cid, "comment", comment)
+            client.setProperty(handle, "comment", comment)
         } else {
-            client.resetProperty(cid, "comment")
+            client.resetProperty(handle, "comment")
         }
         _commentResult.value = SaveResult.Success
         _commentResult.value = null

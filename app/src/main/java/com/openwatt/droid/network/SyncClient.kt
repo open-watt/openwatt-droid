@@ -33,8 +33,14 @@ import java.util.concurrent.atomic.AtomicInteger
  * store (state is stale), poll `/api/health` until the server comes back, then
  * reconnect and replay all active subscriptions.
  *
- * Protocol model: messages split across two axes — authoritative vs proxy, and
- * request vs informational. Informational pushes (spontaneous bind/unbind/set/
+ * Identity model: objects are keyed by an **even session handle** the backend
+ * allocates and announces with `add_name{h, name, type}` before any bind.
+ * Handles live for one WebSocket attach only — a reconnect resets the handle
+ * space, so the name/handle registry and the store are dropped at every attach
+ * boundary. When this client cites a handle back to the backend (set / reset /
+ * destroy), the low bit is set (`h + 1`) to mark it receiver-allocated.
+ *
+ * Message model: informational pushes (spontaneous add_name/bind/unbind/set/
  * state) carry no seq; requests (create/destroy/cmd/enum_req) carry a seq that
  * correlates a later bind/unbind/result/enum or error reply. Seq 0 means
  * "spontaneous, no correlation".
@@ -60,6 +66,17 @@ class SyncClient(private val server: Server) {
     private val lock = Any()
     private val subRefCounts = mutableMapOf<String, Int>()
 
+    /**
+     * Patterns already sent on the *current* socket. The server answers a
+     * repeat subscription with property values but no `bind` frames, and an
+     * object stays invisible until it is bound — so a redundant re-subscribe
+     * could leave a view permanently empty.
+     */
+    private val sentPatterns = mutableSetOf<String>()
+
+    /** Session name registry: handle -> (name, type), from `add_name` frames. */
+    private val names = mutableMapOf<Long, NameEntry>()
+
     private val seqCounter = AtomicInteger(1)
     private val pending = mutableMapOf<Int, PendingRequest>()
 
@@ -76,7 +93,13 @@ class SyncClient(private val server: Server) {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             _connected.postValue(true)
             synchronized(lock) {
+                // Handles are scoped to this attach — anything surviving from
+                // a previous one is stale.
+                names.clear()
+                sentPatterns.clear()
+                store.clear()
                 for (pattern in subRefCounts.keys) {
+                    sentPatterns.add(pattern)
                     sendJson(webSocket, mapOf("kind" to "sub", "pattern" to pattern))
                 }
             }
@@ -123,8 +146,11 @@ class SyncClient(private val server: Server) {
         synchronized(lock) {
             val c = subRefCounts.getOrDefault(pattern, 0)
             subRefCounts[pattern] = c + 1
-            if (c == 0) {
-                ws?.let { sendJson(it, mapOf("kind" to "sub", "pattern" to pattern)) }
+            if (c == 0 && pattern !in sentPatterns) {
+                ws?.let {
+                    sentPatterns.add(pattern)
+                    sendJson(it, mapOf("kind" to "sub", "pattern" to pattern))
+                }
             }
         }
     }
@@ -134,6 +160,7 @@ class SyncClient(private val server: Server) {
             val c = subRefCounts.getOrDefault(pattern, 0)
             if (c <= 1) {
                 subRefCounts.remove(pattern)
+                sentPatterns.remove(pattern)
                 ws?.let { sendJson(it, mapOf("kind" to "unsub", "pattern" to pattern)) }
             } else {
                 subRefCounts[pattern] = c - 1
@@ -141,21 +168,21 @@ class SyncClient(private val server: Server) {
         }
     }
 
-    fun setProperty(cid: Int, property: String, value: Any?) {
+    fun setProperty(handle: Long, property: String, value: Any?) {
         val socket = ws ?: return
         sendJson(socket, mapOf(
             "kind" to "set",
-            "target" to cidWire(cid),
+            "target" to citeHandle(handle),
             "prop" to property,
             "value" to value,
         ))
     }
 
-    fun resetProperty(cid: Int, property: String) {
+    fun resetProperty(handle: Long, property: String) {
         val socket = ws ?: return
         sendJson(socket, mapOf(
             "kind" to "reset",
-            "target" to cidWire(cid),
+            "target" to citeHandle(handle),
             "prop" to property,
         ))
     }
@@ -164,25 +191,25 @@ class SyncClient(private val server: Server) {
      * Ask the server to instantiate an authoritative object of [type] with
      * [props] as its initial properties. `name` must be present in props.
      *
-     * Suspends until `bind{seq}` (success) or `error{seq}` (rejection) arrives.
-     * On success returns the new CID; by the time this returns, `store.bind`
-     * has already installed the proxy, so the caller can look it up
-     * immediately via the store.
+     * Suspends until `bind{seq}` (success) or `error{seq}` (rejection)
+     * arrives. On success returns the new session handle; by the time this
+     * returns, `store.bind` has already installed the proxy, so the caller
+     * can look it up immediately via the store.
      */
     suspend fun create(
         type: String,
         props: Map<String, Any?>,
         timeoutMs: Long = 5_000,
-    ): Result<Int> {
+    ): Result<Long> {
         val socket = ws ?: return Result.failure(IOException("sync socket not connected"))
         val seq = seqCounter.getAndIncrement()
-        val deferred = CompletableDeferred<Result<Int>>()
+        val deferred = CompletableDeferred<Result<Long>>()
         synchronized(lock) {
             pending[seq] = PendingRequest(
                 onReply = { json ->
-                    val cid = json.get("target")?.takeIf { !it.isJsonNull }?.asLong?.toInt()
+                    val handle = json.get("target")?.takeIf { !it.isJsonNull }?.asLong
                     deferred.complete(
-                        if (cid != null) Result.success(cid)
+                        if (handle != null) Result.success(handle)
                         else Result.failure(IOException("create reply missing target"))
                     )
                 },
@@ -202,13 +229,13 @@ class SyncClient(private val server: Server) {
     }
 
     /**
-     * Ask the server to destroy the authoritative object behind [cid].
+     * Ask the server to destroy the authoritative object behind [handle].
      * Suspends until `unbind{seq}` or `error{seq}` arrives.
      *
      * Typical failure: "not my object" — the target is a proxy on the server
      * side, so authority lives elsewhere (hub forwarding isn't implemented).
      */
-    suspend fun destroy(cid: Int, timeoutMs: Long = 5_000): Result<Unit> {
+    suspend fun destroy(handle: Long, timeoutMs: Long = 5_000): Result<Unit> {
         val socket = ws ?: return Result.failure(IOException("sync socket not connected"))
         val seq = seqCounter.getAndIncrement()
         val deferred = CompletableDeferred<Result<Unit>>()
@@ -218,7 +245,7 @@ class SyncClient(private val server: Server) {
                 onError = { text -> deferred.complete(Result.failure(IOException(text))) },
             )
         }
-        sendJson(socket, mapOf("kind" to "destroy", "seq" to seq, "target" to cidWire(cid)))
+        sendJson(socket, mapOf("kind" to "destroy", "seq" to seq, "target" to citeHandle(handle)))
         return withTimeoutOrNull(timeoutMs) { deferred.await() } ?: run {
             synchronized(lock) { pending.remove(seq) }
             Result.failure(IOException("destroy timed out"))
@@ -273,13 +300,15 @@ class SyncClient(private val server: Server) {
     }
 
     /**
-     * CIDs are uint32, but a high collection_id sets bit 31 and makes the Kotlin
-     * Int negative. Serialize the unsigned value so the backend receives the
-     * correct CID. Returned as a Long (not UInt) because gson can't serialize
-     * Kotlin's UInt value class — it would reflect into it and emit the wrong
-     * (signed) number.
+     * Format a backend-allocated session handle for citing back to the
+     * backend: the low bit marks it as receiver-allocated. Backend handles
+     * are always even, so `h + 1` sets the bit without signed-bitwise traps.
      */
-    private fun cidWire(cid: Int): Long = cid.toUInt().toLong()
+    private fun citeHandle(handle: Long): Long = handle + 1
+
+    /** Backend session handles are even, non-negative, and fit in a uint32. */
+    private fun isBackendHandle(handle: Long): Boolean =
+        handle in 0..0xFFFF_FFFFL && handle % 2 == 0L
 
     private fun openSocket() {
         val url = buildWsUrl()
@@ -297,8 +326,10 @@ class SyncClient(private val server: Server) {
             if (reconnectJob?.isActive == true) return
             ws = null
             _connected.postValue(false)
-            // Everything received on this channel is orphaned; drop proxies and
-            // fail any pending requests so callers can retry.
+            // Everything received on this channel is orphaned; drop proxies,
+            // the handle registry, and fail pending requests so callers retry.
+            names.clear()
+            sentPatterns.clear()
             store.clear()
             pending.values.forEach { it.onError("disconnected") }
             pending.clear()
@@ -324,47 +355,66 @@ class SyncClient(private val server: Server) {
     private fun handleMessage(text: String) {
         val json = gson.fromJson(text, JsonObject::class.java) ?: return
         val kind = json.get("kind")?.asString ?: return
-        val target = json.get("target")?.takeIf { !it.isJsonNull }?.asLong?.toInt()
+        val target = json.get("target")?.takeIf { !it.isJsonNull }?.asLong
         val seq = json.get("seq")?.takeIf { !it.isJsonNull }?.asInt ?: 0
 
         when (kind) {
+            "add_name" -> {
+                val handle = json.get("h")?.takeIf { !it.isJsonNull }?.asLong ?: return
+                if (!isBackendHandle(handle)) return
+                val name = json.get("name")?.asString ?: return
+                val type = json.get("type")?.asString ?: return
+                synchronized(lock) { names[handle] = NameEntry(name, type) }
+            }
             "bind" -> {
-                val cid = target ?: return
-                val type = json.get("type")?.asString ?: ""
+                // The authority's invalid_handle is ulong.max — a bind citing
+                // it means the object was never introduced. Drop the frame and
+                // fail any request waiting on it.
+                if (target == null || !isBackendHandle(target)) {
+                    if (seq != 0) resolveError(seq, "bind cited an invalid handle")
+                    return
+                }
+                val entry = synchronized(lock) { names[target] }
+                val type = json.get("type")?.asString ?: entry?.type ?: ""
                 val props = json.get("props")
                     ?.takeIf { it.isJsonObject }
                     ?.asJsonObject
                     ?.entrySet()
                     ?.associate { (k, v) -> k to parseJsonValue(v) }
                     ?: emptyMap()
-                store.bind(cid, type, props)
+                val named = if (entry != null) mapOf("name" to entry.name) + props else props
+                store.bind(target, type, named)
                 if (seq != 0) resolveReply(seq, json)
             }
             "unbind" -> {
-                val cid = target ?: return
-                store.unbind(cid)
+                val handle = target ?: return
+                store.unbind(handle)
                 if (seq != 0) resolveReply(seq, json)
             }
             "set" -> {
-                val cid = target ?: return
+                val handle = target ?: return
                 val prop = json.get("prop")?.asString ?: return
                 val value = parseJsonValue(json.get("value"))
-                store.setProperty(cid, prop, value)
+                store.setProperty(handle, prop, value)
             }
             "reset" -> {
-                val cid = target ?: return
+                val handle = target ?: return
                 val prop = json.get("prop")?.asString ?: return
-                store.resetProperty(cid, prop)
+                // The echo carries the effective default when one exists;
+                // its absence means the property has no default at all.
+                val hasValue = json.has("value")
+                val value = if (hasValue) parseJsonValue(json.get("value")) else null
+                store.resetProperty(handle, prop, value, hasValue)
             }
             "state" -> {
-                val cid = target ?: return
+                val handle = target ?: return
                 val signal = json.get("signal")?.asString ?: return
-                store.stateChange(cid, signal)
+                store.stateChange(handle, signal)
             }
             "result", "enum" -> {
                 if (seq != 0) resolveReply(seq, json)
             }
-            "error" -> {
+            "error", "err" -> {
                 if (seq != 0) {
                     val textMsg = json.get("text")?.asString ?: "unknown error"
                     resolveError(seq, textMsg)
@@ -387,6 +437,8 @@ class SyncClient(private val server: Server) {
         val onReply: (JsonObject) -> Unit,
         val onError: (String) -> Unit,
     )
+
+    private class NameEntry(val name: String, val type: String)
 
     private fun parseJsonValue(element: JsonElement?): Any? {
         if (element == null) return null

@@ -39,9 +39,10 @@ class ConfigEditorFragment : Fragment() {
     private var serverId: String? = null
     private var collectionName: String? = null
     private var schema: CollectionSchema? = null
-    private var itemCid: Int? = null
+    private var itemHandle: Long? = null
+    private var itemName: String? = null
     private var item: SyncItem? = null
-    private val isNew: Boolean get() = itemCid == null
+    private val isNew: Boolean get() = itemHandle == null
 
     /** All field views grouped by category, for value extraction and dirty checking */
     private val fieldViews = mutableMapOf<String, MutableList<View>>()
@@ -70,7 +71,8 @@ class ConfigEditorFragment : Fragment() {
         val schemaJson = arguments?.getString(ARG_SCHEMA_JSON)
         schema = schemaJson?.let { Gson().fromJson(it, CollectionSchema::class.java) }
 
-        itemCid = arguments?.getInt(ARG_ITEM_CID, NO_CID)?.takeIf { it != NO_CID }
+        itemHandle = arguments?.getLong(ARG_ITEM_HANDLE, NO_HANDLE)?.takeIf { it != NO_HANDLE }
+        itemName = arguments?.getString(ARG_ITEM_NAME)
     }
 
     override fun onCreateView(
@@ -89,19 +91,20 @@ class ConfigEditorFragment : Fragment() {
 
         serverId?.let { viewModel.initialize(it, currentSchema) }
 
-        // Start observing first so the viewmodel knows which CID to watch,
-        // then snapshot from the store. currentItem() reads itemCid internally
-        // so startObserving must come before it.
-        itemCid?.let { cid ->
-            viewModel.startObserving(cid)
+        // Start observing first so the viewmodel knows which item to watch,
+        // then snapshot from the store. currentItem() reads the handle
+        // internally so startObserving must come before it.
+        itemHandle?.let { handle ->
+            viewModel.startObserving(handle, currentSchema.typeName, itemName)
             item = viewModel.currentItem()
-                ?: SyncItem(cid = cid, type = "") // live updates will fill it in
+                // live updates will fill it in
+                ?: SyncItem(handle = handle, type = currentSchema.typeName)
         }
 
         val title = if (isNew) {
             "New ${formatName(collectionName ?: "Item")}"
         } else {
-            item?.name ?: "#${itemCid}"
+            item?.name ?: itemName ?: "#${itemHandle}"
         }
         binding.editorToolbar.title = title
         binding.editorToolbar.setNavigationIcon(androidx.appcompat.R.drawable.abc_ic_ab_back_material)
@@ -438,7 +441,7 @@ class ConfigEditorFragment : Fragment() {
             if (updatedItem == null) return@observe
             item = updatedItem
             if (!isNew) {
-                binding.editorToolbar.title = updatedItem.name ?: "#${updatedItem.cid}"
+                binding.editorToolbar.title = updatedItem.name ?: "#${updatedItem.handle}"
             }
             // Update non-dirty form fields from the live value. Use getItemValue
             // so the "type" fallback to the bind-level type field is applied
@@ -586,21 +589,28 @@ class ConfigEditorFragment : Fragment() {
         private const val ARG_SERVER_ID = "server_id"
         private const val ARG_COLLECTION_NAME = "collection_name"
         private const val ARG_SCHEMA_JSON = "schema_json"
-        private const val ARG_ITEM_CID = "item_cid"
-        private const val NO_CID = Int.MIN_VALUE
+        private const val ARG_ITEM_HANDLE = "item_handle"
+        private const val ARG_ITEM_NAME = "item_name"
+        private const val NO_HANDLE = Long.MIN_VALUE
 
+        /**
+         * [item] carries both the session handle (fast-path key for this
+         * attach) and the name — the durable half of the item's identity,
+         * which the editor needs to re-subscribe and to survive a reconnect.
+         */
         fun newInstance(
             serverId: String,
             collectionName: String,
             schema: CollectionSchema,
-            cid: Int?,
+            item: SyncItem?,
         ): ConfigEditorFragment {
             return ConfigEditorFragment().apply {
                 arguments = Bundle().apply {
                     putString(ARG_SERVER_ID, serverId)
                     putString(ARG_COLLECTION_NAME, collectionName)
                     putString(ARG_SCHEMA_JSON, Gson().toJson(schema))
-                    putInt(ARG_ITEM_CID, cid ?: NO_CID)
+                    putLong(ARG_ITEM_HANDLE, item?.handle ?: NO_HANDLE)
+                    item?.name?.let { putString(ARG_ITEM_NAME, it) }
                 }
             }
         }

@@ -22,11 +22,11 @@ class ConfigListAdapter(
     private val onItemLongClick: (SyncItem) -> Unit,
 ) : ListAdapter<SyncItem, ConfigListAdapter.ItemViewHolder>(DIFF) {
 
-    /** Callback to get rate history for a given item by cid */
-    var rateHistoryProvider: ((Int) -> Map<String, FloatArray>?)? = null
+    /** Callback to get rate history for a given item by session handle */
+    var rateHistoryProvider: ((Long) -> Map<String, FloatArray>?)? = null
 
-    /** Callback to get high-water marks for a given item by cid */
-    var highWaterMarkProvider: ((Int) -> Map<String, Float>?)? = null
+    /** Callback to get high-water marks for a given item by session handle */
+    var highWaterMarkProvider: ((Long) -> Map<String, Float>?)? = null
 
     /** Which rate keys to show (max 2) */
     var rateKeys: List<String> = emptyList()
@@ -69,7 +69,7 @@ class ConfigListAdapter(
             val context = binding.root.context
             val flagsValue = item.flags
 
-            binding.itemName.text = item.name ?: "#${item.cid}"
+            binding.itemName.text = item.name ?: "#${item.handle}"
 
             val dotColor = when {
                 item.state == "offline" -> R.color.state_idle
@@ -148,8 +148,8 @@ class ConfigListAdapter(
             container.visibility = View.VISIBLE
             container.removeAllViews()
 
-            val history = rateHistoryProvider?.invoke(item.cid)
-            val hwm = highWaterMarkProvider?.invoke(item.cid)
+            val history = rateHistoryProvider?.invoke(item.handle)
+            val hwm = highWaterMarkProvider?.invoke(item.handle)
 
             for ((i, key) in keysToShow.withIndex()) {
                 val data = history?.get(key) ?: FloatArray(0)
@@ -198,7 +198,7 @@ class ConfigListAdapter(
         // be rebinding (rate-ticker rows). DiffUtil lets unchanged rows keep
         // their gesture state.
         private val DIFF = object : DiffUtil.ItemCallback<SyncItem>() {
-            override fun areItemsTheSame(a: SyncItem, b: SyncItem) = a.cid == b.cid
+            override fun areItemsTheSame(a: SyncItem, b: SyncItem) = a.handle == b.handle
             override fun areContentsTheSame(a: SyncItem, b: SyncItem) = a == b
         }
     }

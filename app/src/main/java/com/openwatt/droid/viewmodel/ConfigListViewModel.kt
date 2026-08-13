@@ -34,14 +34,17 @@ class ConfigListViewModel(application: Application) : AndroidViewModel(applicati
     var schema: CollectionSchema? = null
         private set
 
+    /** Concrete type names belonging to this collection (lowercased). */
+    private var acceptedTypes: Set<String> = emptySet()
+
     private var allItems: List<SyncItem> = emptyList()
     private var syncClient: SyncClient? = null
     private var activePattern: String? = null
     private var isSubscribed: Boolean = false
     private var sampleJob: Job? = null
 
-    /** Rate history ring buffers: cid -> (fieldKey -> FloatArray) */
-    private val rateHistory = mutableMapOf<Int, MutableMap<String, FloatArray>>()
+    /** Rate history ring buffers: handle -> (fieldKey -> FloatArray) */
+    private val rateHistory = mutableMapOf<Long, MutableMap<String, FloatArray>>()
     private var rateKeys: List<String> = emptyList()
     /** Matching -max field for each rate key (e.g. tx-rate -> tx-rate-max) */
     private var rateMaxKeys: Map<String, String> = emptyMap()
@@ -50,11 +53,11 @@ class ConfigListViewModel(application: Application) : AndroidViewModel(applicati
     private val _rateHistoryVersion = MutableLiveData(0L)
     val rateHistoryVersion: LiveData<Long> = _rateHistoryVersion
 
-    private val storeObserver = Observer<Map<Int, SyncItem>> { snapshot ->
-        val collectionId = schema?.collectionId ?: return@Observer
+    private val storeObserver = Observer<Map<Long, SyncItem>> { snapshot ->
+        if (acceptedTypes.isEmpty()) return@Observer
         allItems = snapshot.values
-            .filter { it.collectionId == collectionId }
-            .sortedBy { it.name ?: "~${it.cid}" }
+            .filter { it.type.lowercase() in acceptedTypes }
+            .sortedBy { it.name ?: "~${it.handle}" }
         applyFilter()
         if (_isLoading.value == true) _isLoading.value = false
     }
@@ -66,9 +69,20 @@ class ConfigListViewModel(application: Application) : AndroidViewModel(applicati
         const val SAMPLE_INTERVAL_MS = 2000L
     }
 
-    fun initialize(serverId: String, schema: CollectionSchema) {
+    /**
+     * [memberTypeNames] lists the concrete member types of this collection —
+     * the store is shared across all collections, and item identity on the
+     * sync channel is (type, name), so the list filters by type name. Falls
+     * back to the root type when the collection has no polymorphic members.
+     */
+    fun initialize(serverId: String, schema: CollectionSchema, memberTypeNames: Collection<String> = emptyList()) {
         this.serverId = serverId
         this.schema = schema
+
+        acceptedTypes = buildSet {
+            add(schema.typeName.lowercase())
+            memberTypeNames.forEach { add(it.lowercase()) }
+        }.filterTo(mutableSetOf()) { it.isNotEmpty() }
 
         // Detect rate fields for sparklines: tx-rate, rx-rate (exclude -max variants)
         // Order: rx first (left), tx second (right)
@@ -96,7 +110,7 @@ class ConfigListViewModel(application: Application) : AndroidViewModel(applicati
 
         val client = SyncClientManager.get(server)
         syncClient = client
-        // New pattern form is "<type>:<name-glob>" — bare type matches
+        // Pattern form is "<type>:<name-glob>" — a bare (non-`=`) type matches
         // descendants too, so the list view catches every member-type
         // subclass in the collection.
         activePattern = "${schema.typeName}:*"
@@ -165,10 +179,10 @@ class ConfigListViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    fun deleteItem(cid: Int) {
+    fun deleteItem(handle: Long) {
         val client = syncClient ?: return
         viewModelScope.launch {
-            client.destroy(cid).onFailure { e ->
+            client.destroy(handle).onFailure { e ->
                 _error.postValue("Delete failed: ${e.message}")
             }
             // On success, store.unbind has already removed the proxy.
@@ -187,7 +201,7 @@ class ConfigListViewModel(application: Application) : AndroidViewModel(applicati
         if (rateKeys.isEmpty()) return
 
         for (item in items) {
-            val itemHistory = rateHistory.getOrPut(item.cid) { mutableMapOf() }
+            val itemHistory = rateHistory.getOrPut(item.handle) { mutableMapOf() }
             for (key in rateKeys) {
                 val numericValue = extractNumericValue(item.properties[key]) ?: continue
                 val buf = itemHistory.getOrPut(key) { FloatArray(HISTORY_SIZE) }
@@ -197,8 +211,8 @@ class ConfigListViewModel(application: Application) : AndroidViewModel(applicati
             }
         }
         // Drop history for items that no longer exist
-        val currentCids = items.mapTo(HashSet()) { it.cid }
-        rateHistory.keys.removeAll { it !in currentCids }
+        val currentHandles = items.mapTo(HashSet()) { it.handle }
+        rateHistory.keys.removeAll { it !in currentHandles }
 
         _rateHistoryVersion.value = (_rateHistoryVersion.value ?: 0) + 1
     }
@@ -212,13 +226,13 @@ class ConfigListViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    /** Get rate history for an item by cid */
-    fun getRateHistory(cid: Int): Map<String, FloatArray>? = rateHistory[cid]
+    /** Get rate history for an item by handle */
+    fun getRateHistory(handle: Long): Map<String, FloatArray>? = rateHistory[handle]
 
     /** Get high-water marks from the backend's -max fields for an item */
-    fun getHighWaterMarks(cid: Int): Map<String, Float>? {
+    fun getHighWaterMarks(handle: Long): Map<String, Float>? {
         if (rateMaxKeys.isEmpty()) return null
-        val item = allItems.find { it.cid == cid } ?: return null
+        val item = allItems.find { it.handle == handle } ?: return null
         val result = mutableMapOf<String, Float>()
         for ((rateKey, maxKey) in rateMaxKeys) {
             val maxValue = extractNumericValue(item.properties[maxKey])
@@ -230,8 +244,8 @@ class ConfigListViewModel(application: Application) : AndroidViewModel(applicati
     /** The field keys being tracked for sparklines */
     fun getRateKeys(): List<String> = rateKeys
 
-    /** Get a specific item by CID (for passing to editor) */
-    fun getItem(cid: Int): SyncItem? = allItems.find { it.cid == cid }
+    /** Get a specific item by handle (for passing to editor) */
+    fun getItem(handle: Long): SyncItem? = allItems.find { it.handle == handle }
 
     override fun onCleared() {
         super.onCleared()
