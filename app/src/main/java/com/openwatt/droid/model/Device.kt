@@ -223,21 +223,13 @@ class Device(
         return getSwitchComponents().map { "$id.${it.path}.type" }
     }
 
-    /** Get paths for summary display (polled regularly) */
+    /** Get paths for summary display (fed live while the card is collapsed) */
     fun getSummaryPaths(): List<String> {
         val paths = mutableListOf<String>()
         for (metric in archetype.summary) {
             paths.add("$id.${metric.path}")
         }
         archetype.stateSource?.let { paths.add("$id.$it") }
-        return paths
-    }
-
-    /** Get all element paths when expanded (skip constant/config modes) */
-    fun getExpandedPaths(): List<String> {
-        if (!expanded || structure == null) return emptyList()
-        val paths = mutableListOf<String>()
-        collectElementPaths(structure!!.components, "", paths, skipNoPoll = true)
         return paths
     }
 
@@ -274,24 +266,6 @@ class Device(
         }
         for ((subId, subComp) in comp.components) {
             collectAllNestedElements(subComp, "$compPath.$subId", paths)
-        }
-    }
-
-    private fun collectElementPaths(
-        components: Map<String, ComponentStructure>,
-        parentPath: String,
-        paths: MutableList<String>,
-        skipNoPoll: Boolean = false,
-    ) {
-        for ((compId, comp) in components) {
-            if (comp.template == "DeviceInfo") continue
-            val compPath = if (parentPath.isEmpty()) compId else "$parentPath.$compId"
-
-            for ((elemId, elemMeta) in comp.elements) {
-                if (skipNoPoll && elemMeta.mode != null && elemMeta.mode in NO_POLL_MODES) continue
-                paths.add("$id.$compPath.$elemId")
-            }
-            collectElementPaths(comp.components, compPath, paths, skipNoPoll)
         }
     }
 
@@ -353,16 +327,5 @@ class DeviceManager {
     /** Get info paths for initial load (DeviceInfo + switch types) */
     fun getInfoPaths(): List<String> {
         return devices.values.flatMap { it.getInfoPaths() + it.getSwitchTypePaths() }
-    }
-
-    /** Get paths for polling (summary + expanded) */
-    fun getPollingPaths(): List<String> {
-        return devices.values.flatMap { device ->
-            val paths = device.getSummaryPaths().toMutableList()
-            if (device.expanded) {
-                paths.addAll(device.getExpandedPaths())
-            }
-            paths
-        }
     }
 }

@@ -27,14 +27,6 @@ class SyncStore {
     fun getItem(handle: Long): SyncItem? = synchronized(lock) { map[handle] }
 
     /**
-     * Look an item up by its persistent identity. Used to re-acquire a fresh
-     * handle after a reconnect invalidates the one a screen was holding.
-     */
-    fun findItem(type: String, name: String): SyncItem? = synchronized(lock) {
-        map.values.firstOrNull { it.type == type && it.name == name }
-    }
-
-    /**
      * Register schema defaults per type — called once per server after `/api/schema`
      * loads, before the sync session starts. Any already-bound items are re-seeded
      * so late-arriving schemas still populate unset properties.

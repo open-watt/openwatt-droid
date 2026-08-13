@@ -143,12 +143,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                     deviceManager.initFromList(structure)
 
                     // Static identity (info + switch types), fetched once.
-                    val infoPaths = deviceManager.getInfoPaths()
-                    if (infoPaths.isNotEmpty()) {
-                        apiClient.getValues(server, infoPaths).onSuccess { values ->
-                            deviceManager.updateValues(values)
-                        }
-                    }
+                    fetchStaticInfo(deviceManager.getInfoPaths())
 
                     reconcileSwitchSubscriptions()
                     _switches.value = buildSwitchList()
@@ -162,6 +157,22 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 _isLoading.value = false
             }
         }
+    }
+
+    /**
+     * One-shot read of static identity elements via the mirror; the burst
+     * lands there, so fold the values into the device model from it.
+     */
+    private suspend fun fetchStaticInfo(paths: List<String>) {
+        val client = syncClient ?: return
+        if (paths.isEmpty()) return
+        client.model.fetch(paths.map { "device:$it" })
+        val entries = mutableMapOf<String, Map<String, Any?>>()
+        for (path in paths) {
+            val node = client.model.getNode(path) ?: continue
+            entries[path] = mapOf("value" to node.value, "unit" to node.unit)
+        }
+        if (entries.isNotEmpty()) deviceManager.updateValues(entries)
     }
 
     /**
@@ -254,11 +265,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                                 (device?.getInfoPaths() ?: emptyList()) +
                                     (device?.getSwitchTypePaths() ?: emptyList())
                             }
-                            if (newInfoPaths.isNotEmpty()) {
-                                apiClient.getValues(server, newInfoPaths).onSuccess { values ->
-                                    deviceManager.updateValues(values)
-                                }
-                            }
+                            fetchStaticInfo(newInfoPaths)
                         }
 
                         if (added.isNotEmpty() || (previousIds - currentIds).isNotEmpty()) {

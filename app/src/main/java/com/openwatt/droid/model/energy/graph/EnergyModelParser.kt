@@ -1,12 +1,13 @@
 package com.openwatt.droid.model.energy.graph
 
 /**
- * Parses a flat `/api/get` element map (the synthetic `energy` device's subtree)
- * into an [EnergyModel]. Ported from openwatt-web/js/models/energy-model.js
+ * Parses a flat element map (the synthetic `energy` device's subtree) into an
+ * [EnergyModel]. Ported from openwatt-web/js/models/energy-model.js
  * (`parseEnergyModel`).
  *
- * Input is the merged result of `getEnergyElements()` + `getPlannerElements()`:
- * a map of dotted path -> entry, where each entry is either `{value, unit, age}`
+ * Input comes from [com.openwatt.droid.model.energy.EnergySource]'s mirror
+ * snapshot of `device:energy.**`, reshaped to the classic `/api/get` form: a
+ * map of dotted path -> entry, where each entry is either `{value, unit, age}`
  * or a bare value. Per-phase arrays are collapsed to the phase-0 aggregate;
  * quantity objects `{q,u}` collapse to their scalar `q`; JSON null stays null
  * ("unknown").
