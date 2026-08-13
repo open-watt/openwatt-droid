@@ -4,6 +4,7 @@ import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.InsetDrawable
 import android.util.TypedValue
 import android.view.LayoutInflater
 import android.view.ViewGroup
@@ -109,6 +110,9 @@ class ConfigBrowserAdapter(
     }
 }
 
+/** Badge circle diameter as a fraction of the (square) icon box. */
+private const val BADGE_CIRCLE_SCALE = 0.62f
+
 /**
  * Render a collection icon into [view]. Most icons are plain emoji, but the
  * [CollectionIcons.BADGE_PREFIX] sentinel (`badge:<letter>:<#hexColor>`) is drawn
@@ -138,21 +142,26 @@ private fun bindCollectionIcon(
         // drawn small and bold; the BLE rune is non-ASCII and drawn larger at
         // normal weight — matching the web's `.icon-badge` / `.icon-bt` rules.
         val isRune = letter.isNotEmpty() && letter[0].code > 0x7F
-        // Emoji glyphs render smaller than their nominal text size, so scale the
-        // circle down to sit at the same visual weight as the neighbouring icons.
-        val diameter = defaultTextSize * 0.75f // px, ~= an emoji glyph
-        val boxPx = view.layoutParams?.width ?: 0
-        val pad = if (boxPx > diameter) ((boxPx - diameter) / 2f).toInt() else 0
+        // A View's background fills the whole icon box and ignores padding, so the
+        // circle is sized with an InsetDrawable: inset the oval until it is smaller
+        // than the box, matching the visual weight of the neighbouring emoji icons.
+        val boxPx = (view.layoutParams?.width ?: 0).takeIf { it > 0 }
+            ?: (defaultTextSize * 1.75f).toInt()
+        val diameter = (boxPx * BADGE_CIRCLE_SCALE).toInt()
+        val inset = (boxPx - diameter) / 2
+        val oval = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(runCatching { Color.parseColor(colorHex) }.getOrDefault(Color.DKGRAY))
+        }
 
         view.text = letter
         view.setTextColor(Color.WHITE)
         view.setTypeface(defaultTypeface, if (isRune) Typeface.NORMAL else Typeface.BOLD)
-        view.setTextSize(TypedValue.COMPLEX_UNIT_PX, diameter * if (isRune) 0.9f else 0.62f)
-        view.background = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(runCatching { Color.parseColor(colorHex) }.getOrDefault(Color.DKGRAY))
-        }
-        view.setPadding(pad, pad, pad, pad)
+        view.setTextSize(TypedValue.COMPLEX_UNIT_PX, diameter * if (isRune) 1.0f else 0.78f)
+        // Text is gravity-centred in the box and the circle is symmetrically inset,
+        // so both share the same centre — no padding needed.
+        view.background = InsetDrawable(oval, inset)
+        view.setPadding(0, 0, 0, 0)
     } else {
         view.text = icon
         view.background = null
