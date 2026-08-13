@@ -7,6 +7,7 @@ import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.viewModelScope
 import com.openwatt.droid.model.Server
 import com.openwatt.droid.network.CliClient
+import com.openwatt.droid.network.SyncClientManager
 import com.openwatt.droid.repository.ServerRepository
 import kotlinx.coroutines.launch
 
@@ -52,16 +53,22 @@ class ConsoleViewModel(application: Application) : AndroidViewModel(application)
                 _isLoading.value = true
                 appendOutput("> $command\n")
 
-                val result = cliClient.executeCommand(server, command)
+                // Commands ride the sync socket (latent commands answer when
+                // they finish); REST /api/cli/execute remains as a fallback
+                // while the socket is down.
+                val sync = SyncClientManager.get(server)
+                val result = sync.cmd(command).map { it.text }.recoverCatching { e ->
+                    if (sync.connected.value == true) throw e
+                    cliClient.executeCommand(server, command).getOrThrow().let { response ->
+                        response.error?.let { throw java.io.IOException(it) }
+                        response.output
+                    }
+                }
 
-                result.onSuccess { response ->
-                    if (response.error != null) {
-                        appendOutput("ERROR: ${response.error}\n")
-                    } else {
-                        appendOutput(response.output)
-                        if (!response.output.endsWith("\n")) {
-                            appendOutput("\n")
-                        }
+                result.onSuccess { output ->
+                    appendOutput(output)
+                    if (!output.endsWith("\n")) {
+                        appendOutput("\n")
                     }
                 }.onFailure { error ->
                     appendOutput("ERROR: ${error.message}\n")

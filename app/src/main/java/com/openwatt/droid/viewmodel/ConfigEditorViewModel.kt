@@ -302,18 +302,23 @@ class ConfigEditorViewModel(application: Application) : AndroidViewModel(applica
     }
 
     /**
-     * Load collection items for reference field suggestions.
-     * This remains HTTP-based since we just need a one-shot list of names.
+     * Load collection item names for reference field suggestions, via the
+     * collection's auto-generated `list` command over the sync socket
+     * (`result.value` is a plain name array). Falls back to the CLI REST
+     * endpoint while the socket is down.
      */
     fun loadCollectionRef(refType: String) {
         val server = serverId?.let { serverRepository.getServer(it) } ?: return
+        val client = syncClient
 
         viewModelScope.launch {
             try {
-                cliClient.listCollection(server, "/$refType").onSuccess { items ->
-                    val names = items.map { it.name }
-                    _refLoaded.value = refType to names
-                }
+                val names = client?.cmd("/$refType/list")?.getOrNull()
+                    ?.let { (it.value as? List<*>)?.filterIsInstance<String>() }
+                    ?: cliClient.listCollection(server, "/$refType").getOrNull()
+                        ?.map { it.name }
+                    ?: return@launch
+                _refLoaded.value = refType to names
             } catch (_: Exception) {
                 // Silently fail
             }

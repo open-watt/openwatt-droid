@@ -326,6 +326,7 @@ class SyncClient(private val server: Server) {
     /**
      * Send a seq-correlated request and await its reply frame. Used by the
      * model plane (acked by `res`/`err`) and other generic requests.
+     * [timeoutMs] <= 0 waits indefinitely (a disconnect still fails it).
      */
     internal suspend fun request(
         msg: Map<String, Any?>,
@@ -341,11 +342,31 @@ class SyncClient(private val server: Server) {
             )
         }
         sendJson(socket, msg + ("seq" to seq))
+        if (timeoutMs <= 0) return deferred.await()
         return withTimeoutOrNull(timeoutMs) { deferred.await() } ?: run {
             synchronized(lock) { pending.remove(seq) }
             Result.failure(IOException("request timed out"))
         }
     }
+
+    /** A console command's reply: rendered output plus structured value. */
+    data class CmdResult(val text: String, val value: Any?)
+
+    /**
+     * Run a console command over the sync socket.
+     *
+     * No client-side timeout: the backend holds latent (async) commands open
+     * and answers when they finish, so the seq stays pending until then. A
+     * dropped connection fails everything pending, so a command whose side
+     * effect kills the link still settles.
+     */
+    suspend fun cmd(text: String): Result<CmdResult> =
+        request(mapOf("kind" to "cmd", "text" to text), timeoutMs = 0).map { json ->
+            CmdResult(
+                text = json.get("text")?.takeIf { !it.isJsonNull }?.asString ?: "",
+                value = parseValue(json.get("value")),
+            )
+        }
 
     /**
      * Format a backend-allocated session handle for citing back to the

@@ -276,6 +276,7 @@ class DashboardActivity : AppCompatActivity() {
         val serverRepository = ServerRepository(this)
         val server = currentServerId?.let { serverRepository.getServer(it) } ?: return
         val cliClient = CliClient()
+        val sync = com.openwatt.droid.network.SyncClientManager.get(server)
 
         // Inflate dialog view
         val dialogView = layoutInflater.inflate(R.layout.dialog_system_info, null)
@@ -293,9 +294,12 @@ class DashboardActivity : AppCompatActivity() {
         pollingJob = lifecycleScope.launch {
             while (isActive) {
                 try {
-                    val result = cliClient.executeCommand(server, "/system/sysinfo")
-                    result.onSuccess { response ->
-                        textView.text = response.output
+                    // Sync socket first; REST fallback while it's down.
+                    val result = sync.cmd("/system/sysinfo").map { it.text }.recoverCatching {
+                        cliClient.executeCommand(server, "/system/sysinfo").getOrThrow().output
+                    }
+                    result.onSuccess { output ->
+                        textView.text = output
                     }.onFailure { exception ->
                         textView.text = "Error: ${exception.message}"
                     }

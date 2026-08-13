@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.openwatt.droid.model.Server
 import com.openwatt.droid.model.SystemInfo
 import com.openwatt.droid.network.CliClient
+import com.openwatt.droid.network.SyncClientManager
 import com.openwatt.droid.repository.ServerRepository
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -69,10 +70,14 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             try {
                 _isLoading.value = true
-                val result = cliClient.executeCommand(server, "/system/sysinfo")
+                // Prefer the sync socket; fall back to REST while it's down.
+                val sync = SyncClientManager.get(server)
+                val result = sync.cmd("/system/sysinfo").map { it.text }.recoverCatching {
+                    cliClient.executeCommand(server, "/system/sysinfo").getOrThrow().output
+                }
 
-                result.onSuccess { response ->
-                    _systemInfo.value = parseSystemInfo(response.output)
+                result.onSuccess { output ->
+                    _systemInfo.value = parseSystemInfo(output)
                     updateLastUpdatedTime()
                     _isOnline.value = true
                     consecutiveFailures = 0
