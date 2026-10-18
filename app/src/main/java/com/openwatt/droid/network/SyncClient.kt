@@ -622,9 +622,7 @@ class SyncClient(private val server: Server) {
                 }
             }
             "log" -> {
-                val msg = json.get("msg")?.takeIf { !it.isJsonNull }?.asString
-                    ?: json.get("payload")?.takeIf { !it.isJsonNull }?.asString
-                    ?: return
+                val msg = json.get("msg")?.takeIf { !it.isJsonNull }?.asString ?: return
                 appendLog(msg)
             }
         }
