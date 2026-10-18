@@ -544,8 +544,16 @@ class SyncClient(private val server: Server) {
         }
     }
 
+    // A frame is one message, or an array of messages the node bundled; each is handled alone, in order.
     private fun handleMessage(text: String) {
-        val json = gson.fromJson(text, JsonObject::class.java) ?: return
+        val frame = gson.fromJson(text, JsonElement::class.java) ?: return
+        if (!frame.isJsonArray)
+            return handleFrame(frame.asJsonObject)
+        for (msg in frame.asJsonArray)
+            runCatching { handleFrame(msg.asJsonObject) }
+    }
+
+    private fun handleFrame(json: JsonObject) {
         val kind = json.get("kind")?.asString ?: return
         if (model.handleFrame(kind, json)) return
         val target = json.get("target")?.takeIf { !it.isJsonNull }?.asLong
