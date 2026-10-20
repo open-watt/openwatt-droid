@@ -13,15 +13,15 @@ import java.util.concurrent.CopyOnWriteArraySet
  *
  * The backend serves the `device` namespace as handle-bound nodes: `type`
  * interns formats and enums before first cite, `add` binds a handle to a path
- * carrying schema plus current value, `val` feeds samples. Views read the
- * mirror instead of polling `/api/get`.
+ * carrying schema, `val` feeds samples, tagged with a one-shot read's seq.
+ * Views read the mirror instead of polling `/api/get`.
  *
  * Wire shapes (manager/sync/json_encoder.d):
  *   hello {ver, host, caps[], encoders[], max_frame}
  *   type  {ft, format:{type, series, count?, rate?, unit?, enum?, min?, max?, step?}}
  *   type  {name, members:{...}}
- *   add   {h, path, class, ft?, access?, mode?, v?, t?}
- *   val   {h, s:[[t,v],...], lost?}
+ *   add   {h, path, class, ft?, access?, mode?}
+ *   val   {seq?, h, s:[[t,v],...], lost?}
  *   res   {seq, value?} | err {seq, code, text}
  *
  * Threading: frames arrive on the WebSocket reader thread; all state is

@@ -18,9 +18,8 @@ import kotlinx.coroutines.launch
 import androidx.lifecycle.lifecycleScope
 
 /**
- * Bottom sheet showing an element's recent history: a recorded backfill via
- * `history_req` seeding the chart, with the live model feed appending from
- * there.
+ * Bottom sheet showing an element's recent history: a one-shot window read
+ * seeding the chart, with the live model feed appending from there.
  *
  * Mirrors the web client's element-history flow: the live feed is armed
  * *before* the recorded window is requested, so anything recorded between
@@ -154,7 +153,7 @@ class ElementHistorySheet : BottomSheetDialogFragment() {
         if (_binding == null) return
         binding.historyNote.visibility = if (recorded) View.GONE else View.VISIBLE
         binding.historyNote.text =
-            "No recorded history for this element — showing live samples only"
+            "No history in this window — showing live samples only"
     }
 
     private fun repaint() {

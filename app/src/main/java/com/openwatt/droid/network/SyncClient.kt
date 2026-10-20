@@ -332,6 +332,7 @@ class SyncClient(private val server: Server) {
     internal suspend fun request(
         msg: Map<String, Any?>,
         timeoutMs: Long = 10_000,
+        onSamples: ((JsonObject) -> Unit)? = null,
     ): Result<JsonObject> {
         val socket = ws ?: return Result.failure(IOException("sync socket not connected"))
         val seq = seqCounter.getAndIncrement()
@@ -340,6 +341,7 @@ class SyncClient(private val server: Server) {
             pending[seq] = PendingRequest(
                 onReply = { json -> deferred.complete(Result.success(json)) },
                 onError = { text -> deferred.complete(Result.failure(IOException(text))) },
+                onSamples = onSamples,
             )
         }
         sendJson(socket, msg + ("seq" to seq))
@@ -370,8 +372,9 @@ class SyncClient(private val server: Server) {
         }
 
     /**
-     * Fetch recorded samples for an element path via `history_req`.
-     * Times are unix ms; the backend caps a request at 2000 samples.
+     * Read an element's samples over a window: a one-shot `sub` whose `val`s
+     * carry its seq until `res` closes it. Times are unix ms;
+     * [maxPoints] reduces the window to the mean of that many equal spans.
      * An empty result is normal for constant elements (no history is kept).
      */
     suspend fun history(
@@ -381,23 +384,23 @@ class SyncClient(private val server: Server) {
         maxPoints: Int = 500,
     ): Result<List<ModelMirror.Sample>> {
         val msg = buildMap<String, Any?> {
-            put("kind", "history_req")
-            put("path", path)
+            put("kind", "sub")
+            put("patterns", listOf("device:$path"))
+            put("once", true)
             put("from", from)
             if (to > 0) put("to", to)
-            put("max", maxPoints.coerceIn(1, 2000))
+            put("points", maxPoints.coerceAtLeast(1))
         }
-        return request(msg, timeoutMs = 15_000).map { json ->
-            json.get("samples")?.takeIf { it.isJsonArray }?.asJsonArray
-                ?.mapNotNull { sample ->
-                    val arr = sample.takeIf { it.isJsonArray }?.asJsonArray ?: return@mapNotNull null
-                    if (arr.size() < 2) return@mapNotNull null
-                    val time = arr.get(0).takeIf { !it.isJsonNull }?.asLong ?: return@mapNotNull null
-                    val (value, _) = ModelMirror.unpackQuantity(parseValue(arr.get(1)))
-                    ModelMirror.Sample(time, value)
-                }
-                ?: emptyList()
-        }
+        val samples = mutableListOf<ModelMirror.Sample>()
+        return request(msg, timeoutMs = 15_000) { json ->
+            json.get("s")?.takeIf { it.isJsonArray }?.asJsonArray?.forEach { sample ->
+                val arr = sample.takeIf { it.isJsonArray }?.asJsonArray ?: return@forEach
+                if (arr.size() < 2) return@forEach
+                val time = arr.get(0).takeIf { !it.isJsonNull }?.asLong ?: return@forEach
+                val (value, _) = ModelMirror.unpackQuantity(parseValue(arr.get(1)))
+                samples += ModelMirror.Sample(time, value)
+            }
+        }.map { samples }
     }
 
     /**
@@ -555,9 +558,14 @@ class SyncClient(private val server: Server) {
 
     private fun handleFrame(json: JsonObject) {
         val kind = json.get("kind")?.asString ?: return
+        val seq = json.get("seq")?.takeIf { !it.isJsonNull }?.asInt ?: 0
+        // A read that collects its own samples takes its vals; any other's land on the mirror.
+        if (kind == "val" && seq != 0) {
+            val collect = synchronized(lock) { pending[seq]?.onSamples }
+            if (collect != null) return collect(json)
+        }
         if (model.handleFrame(kind, json)) return
         val target = json.get("target")?.takeIf { !it.isJsonNull }?.asLong
-        val seq = json.get("seq")?.takeIf { !it.isJsonNull }?.asInt ?: 0
 
         when (kind) {
             "add_name" -> {
@@ -612,7 +620,7 @@ class SyncClient(private val server: Server) {
                 val signal = json.get("signal")?.asString ?: return
                 store.stateChange(handle, signal)
             }
-            "result", "enum", "res", "history", "suggestions" -> {
+            "result", "enum", "res", "suggestions" -> {
                 if (seq != 0) resolveReply(seq, json)
             }
             "error", "err" -> {
@@ -641,6 +649,7 @@ class SyncClient(private val server: Server) {
     private class PendingRequest(
         val onReply: (JsonObject) -> Unit,
         val onError: (String) -> Unit,
+        val onSamples: ((JsonObject) -> Unit)? = null,
     )
 
     private class NameEntry(val name: String, val type: String)
